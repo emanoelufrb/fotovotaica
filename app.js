@@ -1,0 +1,1920 @@
+"use strict";
+/* =======================================================================
+   ARMAZENAMENTO
+   ======================================================================= */
+const LSKEY = "pvlev.projetos.v1";
+let memoryDB = null;          // fallback quando localStorage não está disponível
+let storageWarned = false;
+
+function lsAvailable(){
+  try{ const t="__t"; localStorage.setItem(t,"1"); localStorage.removeItem(t); return true; }
+  catch(e){ return false; }
+}
+const HAS_LS = lsAvailable();
+
+function loadDB(){
+  if(!HAS_LS){ if(!memoryDB) memoryDB={projetos:[]}; return memoryDB; }
+  try{
+    const raw = localStorage.getItem(LSKEY);
+    if(!raw) return {projetos:[]};
+    const d = JSON.parse(raw);
+    return (d && Array.isArray(d.projetos)) ? d : {projetos:[]};
+  }catch(e){ return {projetos:[]}; }
+}
+function saveDB(){
+  if(!HAS_LS){ memoryDB = DB; if(!storageWarned){storageWarned=true; toast("Sem acesso ao armazenamento do navegador — os dados ficam só nesta sessão. Exporte o JSON ao terminar.");} return; }
+  try{ localStorage.setItem(LSKEY, JSON.stringify(DB)); }
+  catch(e){ toast("Não foi possível salvar: armazenamento cheio. Remova fotos ou exporte o projeto."); }
+}
+let DB = loadDB();
+
+/* =======================================================================
+   UTILITÁRIOS
+   ======================================================================= */
+const MESES = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+const MESES_C = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+const UF = ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"];
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const num = v => { const n = parseFloat(String(v).replace(",", ".")); return isFinite(n) ? n : 0; };
+const has = v => v !== "" && v !== null && v !== undefined && !(typeof v === "number" && isNaN(v));
+const esc = s => String(s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+
+function fmt(v, dec){
+  if(v === null || v === undefined || !isFinite(v)) return "—";
+  dec = dec === undefined ? (Math.abs(v) >= 100 ? 0 : 2) : dec;
+  return v.toLocaleString("pt-BR",{minimumFractionDigits:dec, maximumFractionDigits:dec});
+}
+function dash(v, dec, suf){
+  if(!isFinite(v) || v === 0) return "—";
+  return fmt(v,dec) + (suf ? " " + suf : "");
+}
+function today(){ return new Date().toISOString().slice(0,10); }
+function dateBR(s){ if(!s) return "—"; const p = String(s).split("-"); return p.length===3 ? `${p[2]}/${p[1]}/${p[0]}` : s; }
+
+function get(obj, path){
+  return path.split(".").reduce((o,k)=> (o === null || o === undefined) ? undefined : o[k], obj);
+}
+function setPath(obj, path, val){
+  const ks = path.split("."); let o = obj;
+  for(let i=0;i<ks.length-1;i++){
+    if(o[ks[i]] === null || typeof o[ks[i]] !== "object") o[ks[i]] = (/^\d+$/.test(ks[i+1]) ? [] : {});
+    o = o[ks[i]];
+  }
+  o[ks[ks.length-1]] = val;
+}
+function deepMerge(base, over){
+  if(Array.isArray(base)) return Array.isArray(over) ? over : base;
+  if(base && typeof base === "object"){
+    const out = {};
+    for(const k in base) out[k] = (over && k in over) ? deepMerge(base[k], over[k]) : base[k];
+    if(over && typeof over === "object") for(const k in over) if(!(k in out)) out[k] = over[k];
+    return out;
+  }
+  return (over === undefined) ? base : over;
+}
+let toastT = null;
+function toast(msg){
+  document.querySelectorAll(".toast").forEach(n=>n.remove());
+  const d = document.createElement("div"); d.className = "toast"; d.textContent = msg;
+  document.body.appendChild(d);
+  clearTimeout(toastT); toastT = setTimeout(()=>d.remove(), 3800);
+}
+const ICON = {
+  sun:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+  warn:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  info:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+  plus:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  back:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>'
+};
+
+/* =======================================================================
+   MODELO DE DADOS
+   ======================================================================= */
+function novoEquipamento(){
+  return {id:uid(), nome:"", cat:"Iluminação", qtd:1, pot:"", tensao:"220", corrente:"", horas:"", dias:30, horario:"", freq:"Diário", obs:""};
+}
+function novoFuturo(){
+  return {id:uid(), nome:"", qtd:1, pot:"", horas:"", dias:30, previsao:"Provável", obs:""};
+}
+function novoObstaculo(){
+  return {id:uid(), tipo:"Árvore", dist:"", alt:"", dir:"Norte", periodo:"Manhã", obs:""};
+}
+function modeloProjeto(nome){
+  return {
+    id: uid(), criadoEm: Date.now(), alteradoEm: Date.now(),
+    nome: nome || "Novo sistema",
+    ident:{cliente:"",projeto:nome||"",tipo:"Residencial",endereco:"",cidade:"",estado:"",cep:"",
+           telefone:"",email:"",responsavel:"",dataVisita:today(),status:"Levantamento",obs:""},
+    consumo:{
+      meses: MESES.map(()=>({kwh:"",valor:""})),
+      tarifa:"Convencional (B1/B2/B3)", tensao:"Baixa tensão — 220 V", classe:"Residencial",
+      custoDispKwh:"", obs:""
+    },
+    equip:{itens:[], futuros:[]},
+    local:{
+      lat:"", lon:"", cidade:"", altitude:"",
+      cobertura:"Cerâmica", material:"", area:"", comprimento:"", largura:"",
+      inclinacao:"", azimute:"", conservacao:"Bom", estrutura:"", manutencao:"Não",
+      localInversor:"", distModInv:"", distInvQuadro:"", localQuadro:"", acesso:"Fácil",
+      obs:"", fotos:[]
+    },
+    sombra:{obstaculos:[], classificacao:"Nenhum",
+            manha:"Não", meioDia:"Não", tarde:"Não", inverno:"Não", verao:"Não",
+            perdaEstimada:"", obs:""},
+    eletrica:{
+      entrada:"Monofásico", tensao:"220 V", potDisponivel:"", disjuntor:"", secaoCond:"",
+      tipoCond:"Cobre", distConexao:"", quadro:"", estadoQuadro:"Bom", espaco:"Sim",
+      barramento:"", aterramento:"Existente", adequacao:"Avaliar", obs:""
+    },
+    dim:{
+      baseConsumo:"Média 12 meses", consumoManual:"", hsp:"", pr:0.78, compensacao:100,
+      perdas:0, descontarDisp:"Sim", hspMensal: MESES.map(()=>""), obs:""
+    },
+    modulo:{fab:"",modelo:"",pot:"",efic:"",voc:"",vmp:"",isc:"",imp:"",
+            coefVoc:-0.28,coefVmp:-0.35,comp:"",larg:"",peso:"",garantia:"",qtd:""},
+    strings:{modPorString:"", nStrings:"", tmin:5, tmaxCel:70},
+    inv:{fab:"",modelo:"",potAC:"",vdcMax:"",mpptMin:"",mpptMax:"",nMppt:"",
+         iMaxMppt:"",maxStrings:"",efic:"",ip:"IP65",tempOp:"-25 a 60 °C"},
+    cabos:{
+      dc:{comp:"",secao:"",corrente:"",tipo:"Cabo solar 1,5 kV"},
+      ac:{comp:"",secao:"",corrente:"",tensao:"220",fases:"Monofásico",tipo:"Cobre / EPR"},
+      disjDC:"",seccDC:"",dpsDC:"",disjAC:"",dpsAC:"",seccAC:"",obs:""
+    },
+    estrutura:{telhado:"Cerâmica",tipo:"Perfil de alumínio",material:"Alumínio + inox",
+               fixacao:"Gancho (telha cerâmica)",pontos:"",estadoCobertura:"Bom",
+               reforco:"Não",avaliacao:"Adequada",obs:""}
+  };
+}
+function normalizar(p){
+  const base = modeloProjeto(p.nome);
+  const out = deepMerge(base, p);
+  out.id = p.id || uid();
+  // garante 12 meses e 12 HSP
+  while(out.consumo.meses.length < 12) out.consumo.meses.push({kwh:"",valor:""});
+  out.consumo.meses = out.consumo.meses.slice(0,12).map(m => ({kwh:m?.kwh??"", valor:m?.valor??""}));
+  while(out.dim.hspMensal.length < 12) out.dim.hspMensal.push("");
+  out.dim.hspMensal = out.dim.hspMensal.slice(0,12);
+  ["itens","futuros"].forEach(k=> { if(!Array.isArray(out.equip[k])) out.equip[k] = []; });
+  if(!Array.isArray(out.sombra.obstaculos)) out.sombra.obstaculos = [];
+  if(!Array.isArray(out.local.fotos)) out.local.fotos = [];
+  return out;
+}
+DB.projetos = DB.projetos.map(normalizar);
+
+/* =======================================================================
+   ESTADO DA APLICAÇÃO
+   ======================================================================= */
+const ABAS = [
+  {id:"ident",    n:"Identificação"},
+  {id:"consumo",  n:"Consumo"},
+  {id:"equip",    n:"Equipamentos"},
+  {id:"local",    n:"Local e telhado"},
+  {id:"sombra",   n:"Sombreamento"},
+  {id:"eletrica", n:"Instalação elétrica"},
+  {id:"dim",      n:"Dimensionamento"},
+  {id:"modulo",   n:"Módulos"},
+  {id:"strings",  n:"Strings"},
+  {id:"inv",      n:"Inversor"},
+  {id:"cabos",    n:"Cabos e proteções"},
+  {id:"estrutura",n:"Estrutura"},
+  {id:"geracao",  n:"Geração"},
+  {id:"resumo",   n:"Resumo do projeto"}
+];
+let view = "home";      // "home" | "projeto"
+let curId = null;       // projeto aberto
+let curTab = "ident";
+const proj = () => DB.projetos.find(p => p.id === curId);
+
+function salvar(flag){
+  const p = proj(); if(p) p.alteradoEm = Date.now();
+  saveDB();
+  if(flag !== false) flashSave();
+}
+let saveT = null;
+function flashSave(){
+  const el = document.getElementById("saveflag"); if(!el) return;
+  el.textContent = "Alterações salvas"; el.classList.add("on");
+  clearTimeout(saveT);
+  saveT = setTimeout(()=>{ el.classList.remove("on"); el.textContent = HAS_LS ? "Salvamento automático" : "Somente nesta sessão"; }, 1600);
+}
+
+/* =======================================================================
+   COMPONENTES DE FORMULÁRIO
+   ======================================================================= */
+function fld(p, path, label, opt){
+  opt = opt || {};
+  const t = opt.type || "text";
+  const col = "c" + (opt.col || 3);
+  const v = get(p, path);
+  const unit = opt.unit ? ` <em>(${esc(opt.unit)})</em>` : "";
+  const ph = opt.ph ? ` placeholder="${esc(opt.ph)}"` : "";
+  const step = opt.step ? ` step="${opt.step}"` : (t === "number" ? ' step="any"' : "");
+  let ctrl;
+  if(t === "select"){
+    ctrl = `<select data-path="${path}">` +
+      opt.options.map(o => `<option value="${esc(o)}"${String(v)===String(o)?" selected":""}>${esc(o)}</option>`).join("") +
+      `</select>`;
+  }else if(t === "textarea"){
+    ctrl = `<textarea data-path="${path}"${ph} rows="${opt.rows||3}">${esc(v??"")}</textarea>`;
+  }else{
+    ctrl = `<input type="${t}" data-path="${path}" value="${esc(v??"")}"${ph}${step}>`;
+  }
+  return `<label class="fld ${col}"><span>${esc(label)}${unit}</span>${ctrl}</label>`;
+}
+function card(title, badge, body, hint){
+  const b = badge ? `<span class="badge ${badge[0]}">${esc(badge[1])}</span>` : "";
+  const h = hint ? `<span class="hint">${esc(hint)}</span>` : "";
+  return `<section class="card"><header><h2>${esc(title)}</h2>${b}<span class="spacer"></span>${h}</header><div class="body">${body}</div></section>`;
+}
+function cardRaw(title, badge, body, hint){
+  const b = badge ? `<span class="badge ${badge[0]}">${esc(badge[1])}</span>` : "";
+  const h = hint ? `<span class="hint">${esc(hint)}</span>` : "";
+  return `<section class="card"><header><h2>${esc(title)}</h2>${b}<span class="spacer"></span>${h}</header><div class="body tight">${body}</div></section>`;
+}
+function kpi(k, v, u, s, accent){
+  return `<div class="kpi${accent?" accent":""}"><div class="k">${esc(k)}</div>
+    <div class="v">${v}${u?`<span class="u">${esc(u)}</span>`:""}</div>
+    ${s?`<div class="s">${esc(s)}</div>`:""}</div>`;
+}
+function alertBox(kind, titulo, texto){
+  const ic = kind === "ok" ? ICON.check : (kind === "info" ? ICON.info : ICON.warn);
+  return `<div class="alert ${kind}">${ic}<div><span class="ttl">${esc(titulo)}</span>${texto?` — ${esc(texto)}`:""}</div></div>`;
+}
+
+/* =======================================================================
+   GRÁFICO DE BARRAS (SVG, sem dependências)
+   ======================================================================= */
+function barChart(labels, series, opt){
+  opt = opt || {};
+  const W = 760, H = opt.height || 230, ml = 46, mr = 8, mt = 12, mb = 26;
+  const iw = W - ml - mr, ih = H - mt - mb;
+  let max = 0;
+  series.forEach(s => s.values.forEach(v => { if(isFinite(v) && v > max) max = v; }));
+  if(max <= 0) max = 1;
+  const ticks = 4, niceMax = niceCeil(max);
+  const y = v => mt + ih - (v / niceMax) * ih;
+  const gw = iw / labels.length;
+  const bw = Math.max(3, (gw * 0.64) / series.length);
+  let g = "";
+  for(let i = 0; i <= ticks; i++){
+    const val = niceMax * i / ticks, yy = y(val);
+    g += `<line x1="${ml}" y1="${yy.toFixed(1)}" x2="${W-mr}" y2="${yy.toFixed(1)}" stroke="#e6eaef"/>`;
+    g += `<text x="${ml-6}" y="${(yy+3.5).toFixed(1)}" text-anchor="end" font-size="10" fill="#6b7683">${fmt(val, niceMax>=100?0:1)}</text>`;
+  }
+  labels.forEach((lb,i)=>{
+    const cx = ml + gw*i + gw/2;
+    series.forEach((s,j)=>{
+      const v = isFinite(s.values[i]) ? s.values[i] : 0;
+      const bh = Math.max(0, (v/niceMax)*ih);
+      const x = cx - (series.length*bw)/2 + j*bw;
+      if(bh > 0) g += `<rect x="${x.toFixed(1)}" y="${(mt+ih-bh).toFixed(1)}" width="${(bw-1.5).toFixed(1)}" height="${bh.toFixed(1)}" fill="${s.color}" rx="1.5"><title>${esc(s.name)} ${esc(lb)}: ${fmt(v,1)}</title></rect>`;
+    });
+    g += `<text x="${cx.toFixed(1)}" y="${H-8}" text-anchor="middle" font-size="10.5" fill="#6b7683">${esc(lb)}</text>`;
+  });
+  if(opt.linha !== undefined && isFinite(opt.linha) && opt.linha > 0){
+    const yy = y(opt.linha);
+    g += `<line x1="${ml}" y1="${yy.toFixed(1)}" x2="${W-mr}" y2="${yy.toFixed(1)}" stroke="#b23a2e" stroke-width="1.3" stroke-dasharray="5 4"/>`;
+    g += `<text x="${W-mr-2}" y="${(yy-4).toFixed(1)}" text-anchor="end" font-size="10" fill="#b23a2e">${esc(opt.linhaLabel||"")} ${fmt(opt.linha,0)}</text>`;
+  }
+  const leg = `<div class="legend">${series.map(s=>`<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join("")}
+    ${opt.linha?`<span><i style="background:#b23a2e"></i>${esc(opt.linhaLabel||"Referência")}</span>`:""}</div>`;
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img">
+    <line x1="${ml}" y1="${mt+ih}" x2="${W-mr}" y2="${mt+ih}" stroke="#c7ced7"/>${g}</svg></div>${leg}`;
+}
+function niceCeil(v){
+  const e = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / e;
+  const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+  return step * e;
+}
+/* =======================================================================
+   MOTOR DE CÁLCULO
+   Tudo aqui é derivado dos dados informados — nada é gravado no projeto.
+   ======================================================================= */
+const DIAS_MES = [31,28,31,30,31,30,31,31,30,31,30,31];
+const RHO_CU = 0.0172;   // Ω·mm²/m a 20 °C
+const RHO_AL = 0.0282;
+
+function calc(p){
+  const C = {};
+
+  /* ---- Consumo ---- */
+  const kwh = p.consumo.meses.map(m => has(m.kwh) ? num(m.kwh) : null);
+  const val = p.consumo.meses.map(m => has(m.valor) ? num(m.valor) : null);
+  const idx = kwh.map((v,i)=> v !== null ? i : -1).filter(i => i >= 0);
+  const vals = idx.map(i => kwh[i]);
+  const soma = vals.reduce((a,b)=>a+b,0);
+  C.mesesInformados = idx.length;
+  C.consumoAnual   = soma;
+  C.media12        = soma / 12;
+  C.mediaInf       = idx.length ? soma / idx.length : 0;
+  C.consumoMedio   = idx.length === 12 ? C.media12 : C.mediaInf;
+  C.maior          = vals.length ? Math.max(...vals) : 0;
+  C.menor          = vals.length ? Math.min(...vals) : 0;
+  C.mesMaior       = vals.length ? MESES[idx[vals.indexOf(C.maior)]] : "—";
+  C.mesMenor       = vals.length ? MESES[idx[vals.indexOf(C.menor)]] : "—";
+  C.amplitude      = C.maior - C.menor;
+  C.amplitudePct   = C.consumoMedio ? (C.amplitude / C.consumoMedio) * 100 : 0;
+  const mediaUlt = n => { const s = vals.slice(-n); return s.length ? s.reduce((a,b)=>a+b,0)/s.length : 0; };
+  C.media3 = mediaUlt(3); C.media6 = mediaUlt(6); C.mediaU12 = mediaUlt(12);
+  const dv = vals.length ? Math.sqrt(vals.reduce((a,b)=>a+Math.pow(b-C.mediaInf,2),0)/vals.length) : 0;
+  C.desvioPadrao = dv;
+  C.desvioPct    = C.mediaInf ? (dv / C.mediaInf) * 100 : 0;
+  const vi = val.filter(v => v !== null);
+  C.faturaAnual  = vi.reduce((a,b)=>a+b,0);
+  C.faturaMedia  = vi.length ? C.faturaAnual / vi.length : 0;
+  C.tarifaMedia  = soma ? C.faturaAnual / soma : 0;
+  C.kwhSerie     = kwh.map(v => v === null ? 0 : v);
+
+  /* ---- Equipamentos ---- */
+  const it = p.equip.itens;
+  C.potInstalada = it.reduce((a,e)=> a + num(e.qtd)*num(e.pot), 0);            // W
+  C.consumoEquip = it.reduce((a,e)=> a + num(e.qtd)*num(e.pot)*num(e.horas)*num(e.dias)/1000, 0); // kWh/mês
+  C.equipRank = it.map(e => ({
+      nome: e.nome || "(sem nome)", cat: e.cat,
+      pot: num(e.qtd)*num(e.pot),
+      kwh: num(e.qtd)*num(e.pot)*num(e.horas)*num(e.dias)/1000
+    })).sort((a,b)=> b.kwh - a.kwh);
+  C.porCategoria = {};
+  C.equipRank.forEach(e => { C.porCategoria[e.cat] = (C.porCategoria[e.cat]||0) + e.kwh; });
+
+  const fut = p.equip.futuros.map(f => ({
+      ...f, potTot: num(f.qtd)*num(f.pot),
+      kwh: num(f.qtd)*num(f.pot)*num(f.horas)*num(f.dias)/1000
+    }));
+  C.futuros = fut;
+  C.futProvavel = fut.filter(f => f.previsao === "Provável" || f.previsao === "Confirmado")
+                     .reduce((a,f)=>a+f.kwh, 0);
+  C.futMaximo   = fut.reduce((a,f)=>a+f.kwh, 0);
+  C.futPotProv  = fut.filter(f => f.previsao === "Provável" || f.previsao === "Confirmado")
+                     .reduce((a,f)=>a+f.potTot, 0);
+  C.futPotMax   = fut.reduce((a,f)=>a+f.potTot, 0);
+
+  C.cenarioAtual    = C.consumoMedio || C.consumoEquip;
+  C.cenarioProvavel = C.cenarioAtual + C.futProvavel;
+  C.cenarioMaximo   = C.cenarioAtual + C.futMaximo;
+
+  /* ---- Dimensionamento ---- */
+  const d = p.dim;
+  const baseMap = {
+    "Média 12 meses":            C.consumoMedio,
+    "Média dos últimos 3 meses": C.media3,
+    "Média dos últimos 6 meses": C.media6,
+    "Maior consumo do ano":      C.maior,
+    "Cenário futuro provável":   C.cenarioProvavel,
+    "Cenário futuro máximo":     C.cenarioMaximo,
+    "Valor manual":              num(d.consumoManual)
+  };
+  C.consumoBase = baseMap[d.baseConsumo] || 0;
+  C.custoDisp   = num(p.consumo.custoDispKwh);
+  C.consumoCompensavel = Math.max(0, C.consumoBase - (d.descontarDisp === "Sim" ? C.custoDisp : 0));
+  C.compensacaoAlvo = num(d.compensacao) || 100;
+  C.energiaAlvo = C.consumoCompensavel * C.compensacaoAlvo / 100;     // kWh/mês
+  C.pr    = num(d.pr) || 0;
+  C.perdas= num(d.perdas) || 0;
+  C.prEf  = C.pr * (1 - C.perdas/100);
+  C.hsp   = num(d.hsp);
+  C.potNecessaria = (C.hsp > 0 && C.prEf > 0) ? C.energiaAlvo / (C.hsp * 30 * C.prEf) : 0;  // kWp
+
+  /* ---- Módulos ---- */
+  const m = p.modulo;
+  C.potMod = num(m.pot);
+  C.nMod   = num(m.qtd);
+  C.potFV  = C.nMod * C.potMod / 1000;                                   // kWp
+  C.areaMod = (num(m.comp) * num(m.larg)) / 1e6;                         // m² (mm × mm)
+  C.areaTotal = C.nMod * C.areaMod;
+  C.pesoTotal = C.nMod * num(m.peso);
+  C.modNecessarios = C.potMod > 0 ? Math.ceil(C.potNecessaria * 1000 / C.potMod) : 0;
+  C.areaDisponivel = num(p.local.area);
+  C.densidade = C.areaMod > 0 ? C.potMod / C.areaMod / 1000 : 0;         // kWp/m²
+
+  /* ---- Strings ---- */
+  const s = p.strings;
+  C.ns  = num(s.modPorString);
+  C.nst = num(s.nStrings);
+  C.modEmStrings = C.ns * C.nst;
+  C.tmin = num(s.tmin); C.tmaxCel = num(s.tmaxCel);
+  const voc = num(m.voc), vmp = num(m.vmp), isc = num(m.isc), imp = num(m.imp);
+  const cVoc = num(m.coefVoc)/100, cVmp = num(m.coefVmp)/100;
+  C.vocFrioMod  = voc * (1 + cVoc * (C.tmin - 25));
+  C.vmpQuenteMod= vmp * (1 + cVmp * (C.tmaxCel - 25));
+  C.vStringNom  = C.ns * vmp;
+  C.vocStringNom= C.ns * voc;
+  C.vocStringFrio   = C.ns * C.vocFrioMod;
+  C.vmpStringQuente = C.ns * C.vmpQuenteMod;
+  C.iString   = imp;
+  C.iscString = isc;
+  C.iTotalDC  = isc * C.nst;
+  C.potStrings = C.ns * C.potMod / 1000;
+
+  /* ---- Inversor ---- */
+  const inv = p.inv;
+  C.potAC   = num(inv.potAC);
+  C.vdcMax  = num(inv.vdcMax);
+  C.mpptMin = num(inv.mpptMin);
+  C.mpptMax = num(inv.mpptMax);
+  C.nMppt   = num(inv.nMppt);
+  C.iMaxMppt= num(inv.iMaxMppt);
+  C.maxStrings = num(inv.maxStrings);
+  C.dcac    = C.potAC > 0 ? C.potFV / C.potAC : 0;
+  C.stringsPorMppt = C.nMppt > 0 ? Math.ceil(C.nst / C.nMppt) : 0;
+  C.iPorMppt = C.stringsPorMppt * isc;
+
+  /* verificações string × inversor */
+  C.chk = [];
+  const ck = (cond, ok, falha, aplicavel) => { if(aplicavel) C.chk.push({ok:cond, txt: cond ? ok : falha}); };
+  ck(C.vocStringFrio <= C.vdcMax,
+     `Tensão de circuito aberto a ${fmt(C.tmin,0)} °C (${fmt(C.vocStringFrio,1)} V) abaixo do limite DC do inversor (${fmt(C.vdcMax,0)} V).`,
+     `Tensão de circuito aberto a frio (${fmt(C.vocStringFrio,1)} V) ULTRAPASSA a tensão DC máxima do inversor (${fmt(C.vdcMax,0)} V).`,
+     C.vocStringFrio > 0 && C.vdcMax > 0);
+  ck(C.vmpStringQuente >= C.mpptMin,
+     `Tensão MPP a quente (${fmt(C.vmpStringQuente,1)} V) dentro da faixa MPPT.`,
+     `Tensão MPP a quente (${fmt(C.vmpStringQuente,1)} V) abaixo do mínimo do MPPT (${fmt(C.mpptMin,0)} V).`,
+     C.vmpStringQuente > 0 && C.mpptMin > 0);
+  ck(C.vStringNom <= C.mpptMax,
+     `Tensão MPP nominal (${fmt(C.vStringNom,1)} V) dentro da faixa MPPT.`,
+     `Tensão MPP nominal (${fmt(C.vStringNom,1)} V) acima do máximo do MPPT (${fmt(C.mpptMax,0)} V).`,
+     C.vStringNom > 0 && C.mpptMax > 0);
+  ck(C.iPorMppt <= C.iMaxMppt,
+     `Corrente por MPPT (${fmt(C.iPorMppt,2)} A) dentro do limite (${fmt(C.iMaxMppt,1)} A).`,
+     `Corrente por MPPT (${fmt(C.iPorMppt,2)} A) acima do limite do inversor (${fmt(C.iMaxMppt,1)} A).`,
+     C.iPorMppt > 0 && C.iMaxMppt > 0);
+  ck(C.nst <= C.maxStrings,
+     `${fmt(C.nst,0)} string(s) dentro do máximo aceito (${fmt(C.maxStrings,0)}).`,
+     `${fmt(C.nst,0)} string(s) acima do máximo aceito pelo inversor (${fmt(C.maxStrings,0)}).`,
+     C.nst > 0 && C.maxStrings > 0);
+  ck(C.modEmStrings === C.nMod,
+     `Módulos nas strings conferem com o total cadastrado (${fmt(C.nMod,0)}).`,
+     `Strings totalizam ${fmt(C.modEmStrings,0)} módulos, mas há ${fmt(C.nMod,0)} cadastrados.`,
+     C.modEmStrings > 0 && C.nMod > 0);
+  ck(C.dcac >= 0.8 && C.dcac <= 1.5,
+     `Relação DC/CA de ${fmt(C.dcac,2)} dentro da faixa usual (0,80 a 1,50).`,
+     `Relação DC/CA de ${fmt(C.dcac,2)} fora da faixa usual (0,80 a 1,50) — confirme o sobredimensionamento aceito pelo fabricante.`,
+     C.dcac > 0);
+
+  /* ---- Cabos ---- */
+  const rho = p.eletrica.tipoCond === "Alumínio" ? RHO_AL : RHO_CU;
+  const cdc = p.cabos.dc, cac = p.cabos.ac;
+  const idc = has(cdc.corrente) ? num(cdc.corrente) : C.iString;
+  C.idc = idc;
+  C.dvDC = (num(cdc.secao) > 0) ? (2 * RHO_CU * num(cdc.comp) * idc) / num(cdc.secao) : 0;
+  C.dvDCpct = C.vStringNom > 0 ? (C.dvDC / C.vStringNom) * 100 : 0;
+  const fator = cac.fases === "Trifásico" ? Math.sqrt(3) : 2;
+  const vAC = num(cac.tensao) || 220;
+  const iac = has(cac.corrente) ? num(cac.corrente) : (C.potAC > 0 ? (C.potAC*1000)/(cac.fases === "Trifásico" ? vAC*Math.sqrt(3) : vAC) : 0);
+  C.iac = iac;
+  C.dvAC = (num(cac.secao) > 0) ? (fator * rho * num(cac.comp) * iac) / num(cac.secao) : 0;
+  C.dvACpct = vAC > 0 ? (C.dvAC / vAC) * 100 : 0;
+
+  /* ---- Geração ---- */
+  C.geracaoMensal = MESES.map((_,i)=>{
+    const h = has(p.dim.hspMensal[i]) ? num(p.dim.hspMensal[i]) : C.hsp;
+    return C.potFV * h * DIAS_MES[i] * C.prEf;
+  });
+  C.geracaoAnual = C.geracaoMensal.reduce((a,b)=>a+b,0);
+  C.geracaoMedia = C.geracaoAnual / 12;
+  C.consumoAnualRef = (C.consumoBase || C.consumoMedio) * 12;
+  C.compensacaoReal = C.consumoAnualRef > 0 ? (C.geracaoAnual / C.consumoAnualRef) * 100 : 0;
+  C.energiaEspecifica = C.potFV > 0 ? C.geracaoAnual / C.potFV : 0;   // kWh/kWp.ano
+
+  /* ---- Sombreamento ---- */
+  C.nObst = p.sombra.obstaculos.length;
+  C.sombraCritica = p.sombra.classificacao === "Alto" || p.sombra.classificacao === "Moderado";
+
+  return C;
+}
+
+/* =======================================================================
+   COMPLETUDE POR SEÇÃO
+   ======================================================================= */
+function completude(p){
+  const C = calc(p);
+  const f = (...vs) => vs.filter(has).filter(v => v !== 0 && v !== "0").length;
+  const sec = (ok, tot) => ({ok, tot, pct: tot ? Math.round(ok/tot*100) : 0});
+  const id = p.ident, lo = p.local, el = p.eletrica, m = p.modulo, st = p.strings, iv = p.inv, cb = p.cabos, es = p.estrutura;
+
+  const r = {
+    ident:    sec(f(id.cliente, id.projeto, id.cidade, id.estado, id.responsavel, id.dataVisita), 6),
+    consumo:  sec(C.mesesInformados + (has(p.consumo.tarifa)?1:0) + (has(p.consumo.tensao)?1:0), 14),
+    equip:    sec(Math.min(p.equip.itens.length, 5), 5),
+    local:    sec(f(lo.lat, lo.lon, lo.cobertura, lo.area, lo.inclinacao, lo.azimute, lo.distModInv, lo.localInversor), 8),
+    sombra:   sec((p.sombra.classificacao === "Nenhum" ? 3 : Math.min(C.nObst,2) + (p.sombra.classificacao?1:0)) , 3),
+    eletrica: sec(f(el.entrada, el.tensao, el.potDisponivel, el.disjuntor, el.secaoCond, el.adequacao), 6),
+    dim:      sec(f(p.dim.hsp, p.dim.pr, p.dim.compensacao) + (C.potNecessaria>0?1:0), 4),
+    modulo:   sec(f(m.fab, m.modelo, m.pot, m.voc, m.vmp, m.isc, m.imp, m.qtd, m.comp, m.larg), 10),
+    strings:  sec(f(st.modPorString, st.nStrings, st.tmin, st.tmaxCel), 4),
+    inv:      sec(f(iv.fab, iv.modelo, iv.potAC, iv.vdcMax, iv.mpptMin, iv.mpptMax, iv.nMppt, iv.iMaxMppt), 8),
+    cabos:    sec(f(cb.dc.comp, cb.dc.secao, cb.ac.comp, cb.ac.secao, cb.disjAC, cb.dpsAC, cb.disjDC, cb.dpsDC), 8),
+    estrutura:sec(f(es.telhado, es.tipo, es.fixacao, es.pontos, es.avaliacao), 5),
+    geracao:  sec(C.geracaoAnual > 0 ? 1 : 0, 1),
+    resumo:   sec(0,0)
+  };
+  const pesos = {ident:1, consumo:2.5, equip:1, local:1.5, sombra:1, eletrica:1.5, dim:1.5,
+                 modulo:1.5, strings:1, inv:1.5, cabos:1, estrutura:1};
+  let acc = 0, tot = 0;
+  for(const k in pesos){ acc += (r[k].pct/100) * pesos[k]; tot += pesos[k]; }
+  r.total = Math.round((acc/tot) * 100);
+  return r;
+}
+
+/* =======================================================================
+   ALERTAS AUTOMÁTICOS
+   ======================================================================= */
+function alertas(p){
+  const C = calc(p), A = [];
+  const add = (kind, t, d) => A.push({kind, t, d});
+
+  if(C.mesesInformados < 12)
+    add("warn","Consumo dos últimos 12 meses incompleto", `${C.mesesInformados} de 12 meses preenchidos — a média usada no dimensionamento pode não representar o perfil anual.`);
+  if(C.mesesInformados >= 6 && C.desvioPct > 30)
+    add("info","Consumo com variação sazonal relevante", `Desvio de ${fmt(C.desvioPct,0)}% entre os meses. Avalie dimensionar pelo perfil, não só pela média.`);
+  if(C.potFV === 0)
+    add("warn","Potência do sistema ainda não definida","Cadastre o módulo e a quantidade na aba Módulos.");
+  if(C.potNecessaria > 0 && C.potFV > 0 && C.potFV < C.potNecessaria * 0.9)
+    add("info","Potência instalada abaixo da necessária", `Estimado ${fmt(C.potNecessaria,2)} kWp para a compensação desejada; cadastrados ${fmt(C.potFV,2)} kWp.`);
+
+  C.chk.filter(c => !c.ok).forEach(c => add("err","Incompatibilidade técnica", c.txt));
+
+  if(C.hsp === 0) add("warn","HSP não informada","Sem irradiação média não é possível estimar a geração.");
+  if(!has(p.strings.tmin) || !has(p.strings.tmaxCel))
+    add("warn","Dados de temperatura não preenchidos","A correção de tensão das strings depende das temperaturas mínima e máxima.");
+  if(C.sombraCritica)
+    add("warn","Sombreamento significativo identificado", `Classificado como ${p.sombra.classificacao}. Avalie reposicionamento, otimizadores ou microinversores.`);
+  if(num(p.local.distModInv) > 30)
+    add("info","Distância elevada entre módulos e inversor", `${fmt(num(p.local.distModInv),0)} m. Verifique queda de tensão DC e bitola do cabo.`);
+  if(C.dvDCpct > 2 && C.dvDC > 0)
+    add("warn","Queda de tensão CC acima de 2%", `Calculada em ${fmt(C.dvDCpct,2)}%. Reavalie a seção do condutor.`);
+  if(C.dvACpct > 3 && C.dvAC > 0)
+    add("warn","Queda de tensão CA acima de 3%", `Calculada em ${fmt(C.dvACpct,2)}%. Reavalie a seção do condutor.`);
+  if(p.eletrica.adequacao === "Sim")
+    add("warn","Instalação elétrica necessita adequação", p.eletrica.obs || "Registrado na aba Instalação elétrica.");
+  if(p.eletrica.adequacao === "Avaliar")
+    add("info","Instalação elétrica pendente de avaliação","Defina na aba Instalação elétrica se há necessidade de adequação.");
+  if(p.estrutura.avaliacao !== "Adequada")
+    add("warn","Estrutura do telhado necessita avaliação", `Situação: ${p.estrutura.avaliacao}.`);
+  if(C.areaDisponivel > 0 && C.areaTotal > C.areaDisponivel)
+    add("err","Área de telhado insuficiente", `Módulos ocupam ${fmt(C.areaTotal,1)} m² e a área informada é ${fmt(C.areaDisponivel,1)} m².`);
+  if(C.potAC > 0 && C.potAC > num(p.eletrica.potDisponivel) && num(p.eletrica.potDisponivel) > 0)
+    add("info","Potência do inversor acima da disponibilizada", "Confirme o limite de potência do padrão de entrada com a distribuidora.");
+  if(C.potFV > 0 && C.potAC === 0)
+    add("warn","Inversor não definido","Cadastre o inversor para validar tensões, correntes e relação DC/CA.");
+  if(p.local.manutencao === "Sim")
+    add("info","Cobertura requer manutenção antes da instalação", p.local.obs || "Registrado na aba Local e telhado.");
+
+  if(!A.length) add("ok","Nenhuma inconsistência detectada","Os dados preenchidos até aqui estão coerentes entre si.");
+  return A;
+}
+/* =======================================================================
+   TELA INICIAL — MEUS SISTEMAS
+   ======================================================================= */
+const STATUS_CLS = {"Levantamento":"s-lev","Em dimensionamento":"s-dim","Em revisão":"s-rev","Aprovado":"s-apr","Executado":"s-exe"};
+
+function renderHome(){
+  const ps = DB.projetos.slice().sort((a,b)=> b.alteradoEm - a.alteradoEm);
+  const cards = ps.map(p => {
+    const C = calc(p), comp = completude(p);
+    return `<article class="proj" data-act="abrir" data-id="${p.id}">
+      <div class="top">
+        <div style="min-width:0">
+          <div class="nm">${esc(p.nome)}</div>
+          <div class="cli">${esc(p.ident.cliente || "Cliente não informado")}${p.ident.cidade?" · "+esc(p.ident.cidade):""}${p.ident.estado?"/"+esc(p.ident.estado):""}</div>
+        </div>
+        <span class="spacer"></span>
+        <span class="status ${STATUS_CLS[p.ident.status]||"s-lev"}">${esc(p.ident.status)}</span>
+      </div>
+      <div class="meta">
+        <span>Consumo <b>${dash(C.consumoMedio,0)}</b> kWh/mês</span>
+        <span>Potência <b>${dash(C.potFV,2)}</b> kWp</span>
+        <span>Módulos <b>${C.nMod||"—"}</b></span>
+      </div>
+      <div>
+        <div class="prog-label"><span class="muted">Preenchimento</span><b>${comp.total}%</b></div>
+        <div class="progress${comp.total>=100?" ok":""}"><i style="width:${comp.total}%"></i></div>
+      </div>
+      <div class="meta small"><span>Atualizado em ${new Date(p.alteradoEm).toLocaleDateString("pt-BR")}</span></div>
+      <div class="acts" data-stop="1">
+        <button class="btn sm" data-act="abrir" data-id="${p.id}">Abrir</button>
+        <button class="btn sm" data-act="renomear" data-id="${p.id}">Renomear</button>
+        <button class="btn sm" data-act="duplicar" data-id="${p.id}">Duplicar</button>
+        <button class="btn sm" data-act="exportar-json" data-id="${p.id}">Exportar</button>
+        <button class="btn sm danger" data-act="excluir" data-id="${p.id}">Excluir</button>
+      </div>
+    </article>`;
+  }).join("");
+
+  return `
+  <header class="topbar">
+    ${brandHTML()}
+    <span class="spacer"></span>
+    <span id="saveflag" class="saveflag">${HAS_LS ? "Salvamento automático" : "Somente nesta sessão"}</span>
+  </header>
+  <div class="home">
+    <div class="home-head">
+      <div>
+        <h1>Meus sistemas</h1>
+        <p>Cada sistema é um projeto independente: levantamento em campo, cálculos e conferência técnica ficam guardados no navegador deste computador.</p>
+      </div>
+      <span class="spacer"></span>
+      <div class="inline-acts">
+        <button class="btn" data-act="importar">Importar projeto</button>
+        <button class="btn primary" data-act="novo">${ICON.plus} Novo sistema</button>
+      </div>
+    </div>
+    ${ps.length ? `<div class="projects">${cards}</div>` :
+      `<div class="empty-state">
+        <h3>Nenhum sistema cadastrado</h3>
+        <p>Crie o primeiro projeto para começar o levantamento, ou importe um arquivo JSON exportado antes.</p>
+        <div class="inline-acts" style="justify-content:center;margin-top:14px">
+          <button class="btn primary" data-act="novo">${ICON.plus} Novo sistema</button>
+          <button class="btn" data-act="importar">Importar projeto</button>
+        </div>
+      </div>`}
+    ${!HAS_LS ? `<div class="disclaimer" style="margin-top:16px">O navegador bloqueou o armazenamento local nesta página. Os projetos existem apenas enquanto a aba estiver aberta — abra o arquivo diretamente do disco ou exporte o JSON antes de fechar.</div>` : ""}
+  </div>`;
+}
+function brandHTML(){
+  return `<div class="brand"><span class="mark">${ICON.sun}</span>
+    <span>Levantamento fotovoltaico<small>Pré-dimensionamento e conferência técnica</small></span></div>`;
+}
+
+/* =======================================================================
+   SHELL DO PROJETO
+   ======================================================================= */
+function renderProjeto(){
+  const p = proj();
+  if(!p){ view = "home"; return renderHome(); }
+  const comp = completude(p);
+  const nav = ABAS.map((a,i)=>{
+    const c = comp[a.id] || {pct:0};
+    const cls = a.id === "resumo" ? "" : (c.pct >= 100 ? "full" : c.pct > 0 ? "part" : "");
+    return `<li><a data-act="aba" data-tab="${a.id}" class="${curTab===a.id?"active":""}">
+      <span class="idx">${i+1}</span>${esc(a.n)}<span class="dot ${cls}"></span></a></li>`;
+  }).join("");
+
+  return `
+  <header class="topbar">
+    <button class="btn icon" data-act="home" title="Voltar para Meus sistemas">${ICON.back}</button>
+    ${brandHTML()}
+    <span class="crumb">Meus sistemas / <b>${esc(p.nome)}</b></span>
+    <span class="spacer"></span>
+    <span id="saveflag" class="saveflag">${HAS_LS ? "Salvamento automático" : "Somente nesta sessão"}</span>
+    <button class="btn" data-act="exportar-json" data-id="${p.id}">JSON</button>
+    <button class="btn" data-act="exportar-csv" data-id="${p.id}">CSV</button>
+    <button class="btn primary" data-act="relatorio" data-id="${p.id}">Relatório</button>
+  </header>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="side-title">Etapas do levantamento</div>
+      <ul class="nav">${nav}</ul>
+      <div class="progress-wrap">
+        <div class="prog-label"><span>Projeto</span><b>${comp.total}% completo</b></div>
+        <div class="progress${comp.total>=100?" ok":""}"><i style="width:${comp.total}%"></i></div>
+      </div>
+    </aside>
+    <main class="content" id="content">${renderTab(p)}</main>
+  </div>`;
+}
+
+function pageHead(t, d){
+  return `<div class="page-head"><div><h1>${esc(t)}</h1><p>${esc(d)}</p></div></div>`;
+}
+
+function renderTab(p){
+  switch(curTab){
+    case "ident":    return tabIdent(p);
+    case "consumo":  return tabConsumo(p);
+    case "equip":    return tabEquip(p);
+    case "local":    return tabLocal(p);
+    case "sombra":   return tabSombra(p);
+    case "eletrica": return tabEletrica(p);
+    case "dim":      return tabDim(p);
+    case "modulo":   return tabModulo(p);
+    case "strings":  return tabStrings(p);
+    case "inv":      return tabInversor(p);
+    case "cabos":    return tabCabos(p);
+    case "estrutura":return tabEstrutura(p);
+    case "geracao":  return tabGeracao(p);
+    case "resumo":   return tabResumo(p);
+  }
+  return "";
+}
+
+/* =======================================================================
+   1. IDENTIFICAÇÃO
+   ======================================================================= */
+function tabIdent(p){
+  const g = `<div class="grid">
+    <div class="subhead">Cliente e projeto</div>
+    ${fld(p,"ident.cliente","Nome do cliente",{col:4})}
+    ${fld(p,"ident.projeto","Nome do projeto",{col:4})}
+    ${fld(p,"ident.tipo","Tipo de instalação",{col:4,type:"select",options:["Residencial","Comercial","Rural","Industrial","Outro"]})}
+    <div class="subhead">Endereço</div>
+    ${fld(p,"ident.endereco","Endereço",{col:6})}
+    ${fld(p,"ident.cidade","Cidade",{col:3})}
+    ${fld(p,"ident.estado","Estado",{col:1,type:"select",options:[""].concat(UF)})}
+    ${fld(p,"ident.cep","CEP",{col:2,ph:"00000-000"})}
+    <div class="subhead">Contato e levantamento</div>
+    ${fld(p,"ident.telefone","Telefone",{col:3,type:"tel"})}
+    ${fld(p,"ident.email","E-mail",{col:3,type:"email"})}
+    ${fld(p,"ident.responsavel","Responsável pelo levantamento",{col:3})}
+    ${fld(p,"ident.dataVisita","Data da visita",{col:3,type:"date"})}
+    ${fld(p,"ident.status","Status do projeto",{col:3,type:"select",options:["Levantamento","Em dimensionamento","Em revisão","Aprovado","Executado"]})}
+    ${fld(p,"ident.obs","Observações gerais",{col:9,type:"textarea"})}
+  </div>`;
+  return pageHead("Identificação","Dados do cliente, do imóvel e do levantamento. O nome do projeto aparece na lista de sistemas e no relatório.") +
+    card("Dados do projeto",["in","Dados informados"], g);
+}
+
+/* =======================================================================
+   2. CONSUMO
+   ======================================================================= */
+function tabConsumo(p){
+  const C = calc(p);
+  const linhas = MESES.map((m,i)=>`<tr>
+      <td>${m}</td>
+      <td class="n"><input type="number" step="any" data-path="consumo.meses.${i}.kwh" value="${esc(p.consumo.meses[i].kwh)}" placeholder="0"></td>
+      <td class="n"><input type="number" step="any" data-path="consumo.meses.${i}.valor" value="${esc(p.consumo.meses[i].valor)}" placeholder="0,00"></td>
+      <td class="n num">${p.consumo.meses[i].kwh && p.consumo.meses[i].valor ? fmt(num(p.consumo.meses[i].valor)/num(p.consumo.meses[i].kwh),3) : "—"}</td>
+    </tr>`).join("");
+
+  const tabela = `<div class="tablewrap"><table>
+    <thead><tr><th>Mês</th><th class="n" style="width:150px">Consumo (kWh)</th><th class="n" style="width:150px">Valor da fatura (R$)</th><th class="n" style="width:130px">R$/kWh</th></tr></thead>
+    <tbody>${linhas}</tbody>
+    <tfoot><tr><td>Total anual</td><td class="n num">${dash(C.consumoAnual,0)}</td><td class="n num">${dash(C.faturaAnual,2)}</td><td class="n num">${dash(C.tarifaMedia,3)}</td></tr></tfoot>
+  </table></div>`;
+
+  const kpis = `<div class="kpis">
+    ${kpi("Consumo médio mensal", dash(C.consumoMedio,0), "kWh", C.mesesInformados<12?`média de ${C.mesesInformados} mês(es) informado(s)`:"ΣE / 12", true)}
+    ${kpi("Consumo anual", dash(C.consumoAnual,0), "kWh")}
+    ${kpi("Maior consumo", dash(C.maior,0), "kWh", C.mesMaior)}
+    ${kpi("Menor consumo", dash(C.menor,0), "kWh", C.mesMenor)}
+    ${kpi("Amplitude", dash(C.amplitude,0), "kWh", `${fmt(C.amplitudePct,0)}% da média`)}
+    ${kpi("Desvio padrão", dash(C.desvioPadrao,1), "kWh", `${fmt(C.desvioPct,1)}% de variação`)}
+    ${kpi("Média — últimos 3 meses", dash(C.media3,0), "kWh")}
+    ${kpi("Média — últimos 6 meses", dash(C.media6,0), "kWh")}
+    ${kpi("Média — 12 meses (ΣE/12)", dash(C.media12,0), "kWh")}
+    ${kpi("Fatura média", dash(C.faturaMedia,2), "R$", C.tarifaMedia?`R$ ${fmt(C.tarifaMedia,3)}/kWh`:"")}
+  </div>`;
+
+  const grafico = barChart(MESES_C, [{name:"Consumo mensal", color:"#17557a", values:C.kwhSerie}],
+    {linha:C.consumoMedio, linhaLabel:"Média"});
+
+  const fatura = `<div class="grid">
+    ${fld(p,"consumo.tarifa","Tipo de tarifa",{col:3,type:"select",options:["Convencional (B1/B2/B3)","Branca","Verde (A4)","Azul (A4)","Rural (B2)","Outra"]})}
+    ${fld(p,"consumo.tensao","Tensão de atendimento",{col:3,type:"select",options:["Baixa tensão — 127 V","Baixa tensão — 220 V","Baixa tensão — 127/220 V","Baixa tensão — 220/380 V","Média tensão — 13,8 kV","Outra"]})}
+    ${fld(p,"consumo.classe","Classe da unidade consumidora",{col:3,type:"select",options:["Residencial","Comercial","Rural","Industrial","Poder público","Serviço público","Outra"]})}
+    ${fld(p,"consumo.custoDispKwh","Custo de disponibilidade",{col:3,type:"number",unit:"kWh/mês",ph:"30, 50 ou 100"})}
+    ${fld(p,"consumo.obs","Observações da fatura",{col:12,type:"textarea",ph:"Bandeira tarifária, créditos acumulados, unidades em autoconsumo remoto, histórico atípico..."})}
+  </div>`;
+
+  return pageHead("Consumo","Histórico de 12 meses da fatura. É daqui que sai a base de cálculo de todo o dimensionamento.") +
+    cardRaw("Histórico dos últimos 12 meses",["in","Dados informados"], tabela, "Informe pelo menos os meses disponíveis na fatura") +
+    card("Indicadores de consumo",["calc","Cálculo automático"], kpis) +
+    card("Perfil mensal",["calc","Cálculo automático"], grafico) +
+    card("Dados da unidade consumidora",["in","Dados informados"], fatura) +
+    (C.mesesInformados < 12 ? card("Atenção",["est","Verificação"], alertBox("warn","Histórico incompleto",`${C.mesesInformados} de 12 meses preenchidos. A média usada nas demais abas considera apenas os meses informados.`)) : "");
+}
+
+/* =======================================================================
+   3. EQUIPAMENTOS E CARGAS
+   ======================================================================= */
+const CATS = ["Iluminação","Refrigeração","Climatização","Aquecimento","Motores","Bombas","Eletrônicos","Cozinha","Veículos elétricos","Máquinas","Outros"];
+
+function tabEquip(p){
+  const C = calc(p);
+  const rows = p.equip.itens.map((e,i)=>`<tr>
+    <td><input type="text" data-path="equip.itens.${i}.nome" value="${esc(e.nome)}" placeholder="Equipamento"></td>
+    <td><select data-path="equip.itens.${i}.cat">${CATS.map(c=>`<option${c===e.cat?" selected":""}>${c}</option>`).join("")}</select></td>
+    <td class="n" style="width:70px"><input type="number" step="any" data-path="equip.itens.${i}.qtd" value="${esc(e.qtd)}"></td>
+    <td class="n" style="width:90px"><input type="number" step="any" data-path="equip.itens.${i}.pot" value="${esc(e.pot)}" placeholder="W"></td>
+    <td class="n num">${dash(num(e.qtd)*num(e.pot),0)}</td>
+    <td style="width:80px"><input type="text" data-path="equip.itens.${i}.tensao" value="${esc(e.tensao)}"></td>
+    <td class="n" style="width:80px"><input type="number" step="any" data-path="equip.itens.${i}.corrente" value="${esc(e.corrente)}" placeholder="A"></td>
+    <td class="n" style="width:75px"><input type="number" step="any" data-path="equip.itens.${i}.horas" value="${esc(e.horas)}"></td>
+    <td class="n" style="width:70px"><input type="number" step="any" data-path="equip.itens.${i}.dias" value="${esc(e.dias)}"></td>
+    <td style="width:100px"><input type="text" data-path="equip.itens.${i}.horario" value="${esc(e.horario)}" placeholder="18h–23h"></td>
+    <td style="width:100px"><select data-path="equip.itens.${i}.freq">${["Diário","Semanal","Eventual"].map(c=>`<option${c===e.freq?" selected":""}>${c}</option>`).join("")}</select></td>
+    <td class="n num">${dash(num(e.qtd)*num(e.pot)*num(e.horas)*num(e.dias)/1000,1)}</td>
+    <td><input type="text" data-path="equip.itens.${i}.obs" value="${esc(e.obs)}" placeholder="—"></td>
+    <td style="width:34px"><button class="rowbtn" data-act="del-equip" data-i="${i}" title="Remover">✕</button></td>
+  </tr>`).join("");
+
+  const tabela = `<div class="tablewrap"><table>
+    <thead><tr><th>Nome</th><th>Categoria</th><th class="n">Qtd</th><th class="n">Pot. unit. (W)</th><th class="n">Pot. total (W)</th>
+    <th>Tensão</th><th class="n">Corrente (A)</th><th class="n">h/dia</th><th class="n">dias/mês</th><th>Horário</th><th>Frequência</th><th class="n">kWh/mês</th><th>Observação</th><th></th></tr></thead>
+    <tbody>${rows || `<tr class="empty-row"><td colspan="14">Nenhum equipamento cadastrado. Comece pelas cargas que mais pesam na conta.</td></tr>`}</tbody>
+    <tfoot><tr><td colspan="4">Totais</td><td class="n num">${dash(C.potInstalada,0)}</td><td colspan="6"></td><td class="n num">${dash(C.consumoEquip,1)}</td><td colspan="2"></td></tr></tfoot>
+  </table></div>
+  <div class="body" style="padding-top:12px"><button class="btn" data-act="add-equip">${ICON.plus} Adicionar equipamento</button></div>`;
+
+  const top = C.equipRank.filter(e=>e.kwh>0).slice(0,6);
+  const rank = top.length ? `<div class="tablewrap"><table>
+      <thead><tr><th>Equipamento</th><th>Categoria</th><th class="n">Potência (W)</th><th class="n">kWh/mês</th><th class="n">% do total</th></tr></thead>
+      <tbody>${top.map(e=>`<tr><td>${esc(e.nome)}</td><td>${esc(e.cat)}</td><td class="n num">${fmt(e.pot,0)}</td><td class="n num">${fmt(e.kwh,1)}</td>
+        <td class="n num">${C.consumoEquip?fmt(e.kwh/C.consumoEquip*100,1):"—"}%</td></tr>`).join("")}</tbody></table></div>`
+    : `<p class="muted">Preencha potência, horas por dia e dias por mês para ver os maiores consumidores.</p>`;
+
+  const resumo = `<div class="kpis">
+    ${kpi("Potência instalada", dash(C.potInstalada/1000,2), "kW", `${p.equip.itens.length} equipamento(s)`, true)}
+    ${kpi("Consumo estimado", dash(C.consumoEquip,1), "kWh/mês", "potência × h/dia × dias/mês")}
+    ${kpi("Média da fatura", dash(C.consumoMedio,0), "kWh/mês", "para comparação")}
+    ${kpi("Aderência ao histórico", C.consumoMedio?fmt(C.consumoEquip/C.consumoMedio*100,0)+"%":"—", "", "levantamento ÷ fatura")}
+  </div>`;
+
+  /* --- Expansão futura --- */
+  const fr = p.equip.futuros.map((e,i)=>`<tr>
+    <td><input type="text" data-path="equip.futuros.${i}.nome" value="${esc(e.nome)}" placeholder="Equipamento"></td>
+    <td class="n" style="width:70px"><input type="number" step="any" data-path="equip.futuros.${i}.qtd" value="${esc(e.qtd)}"></td>
+    <td class="n" style="width:95px"><input type="number" step="any" data-path="equip.futuros.${i}.pot" value="${esc(e.pot)}" placeholder="W"></td>
+    <td class="n" style="width:80px"><input type="number" step="any" data-path="equip.futuros.${i}.horas" value="${esc(e.horas)}"></td>
+    <td class="n" style="width:80px"><input type="number" step="any" data-path="equip.futuros.${i}.dias" value="${esc(e.dias)}"></td>
+    <td style="width:130px"><select data-path="equip.futuros.${i}.previsao">${["Confirmado","Provável","Possível"].map(c=>`<option${c===e.previsao?" selected":""}>${c}</option>`).join("")}</select></td>
+    <td class="n num">${dash(num(e.qtd)*num(e.pot)*num(e.horas)*num(e.dias)/1000,1)}</td>
+    <td><input type="text" data-path="equip.futuros.${i}.obs" value="${esc(e.obs)}" placeholder="—"></td>
+    <td style="width:34px"><button class="rowbtn" data-act="del-fut" data-i="${i}" title="Remover">✕</button></td>
+  </tr>`).join("");
+
+  const tfut = `<div class="tablewrap"><table>
+    <thead><tr><th>Equipamento</th><th class="n">Qtd</th><th class="n">Potência (W)</th><th class="n">h/dia</th><th class="n">dias/mês</th><th>Previsão</th><th class="n">kWh/mês</th><th>Observação</th><th></th></tr></thead>
+    <tbody>${fr || `<tr class="empty-row"><td colspan="9">Nada previsto. Cadastre ar-condicionado, chuveiro, carregador de veículo elétrico, bomba etc.</td></tr>`}</tbody>
+  </table></div>
+  <div class="body" style="padding-top:12px"><button class="btn" data-act="add-fut">${ICON.plus} Adicionar carga futura</button></div>`;
+
+  const cen = `<div class="kpis">
+    ${kpi("Cenário atual", dash(C.cenarioAtual,0), "kWh/mês", "base da fatura")}
+    ${kpi("Futuro provável", dash(C.cenarioProvavel,0), "kWh/mês", `+${fmt(C.futProvavel,0)} kWh · +${fmt(C.futPotProv/1000,2)} kW`, true)}
+    ${kpi("Futuro máximo", dash(C.cenarioMaximo,0), "kWh/mês", `+${fmt(C.futMaximo,0)} kWh · +${fmt(C.futPotMax/1000,2)} kW`)}
+    ${kpi("Acréscimo máximo", C.cenarioAtual?fmt((C.cenarioMaximo/C.cenarioAtual-1)*100,0)+"%":"—","","sobre o consumo atual")}
+  </div>
+  <p class="note" style="margin-top:12px">Escolha na aba Dimensionamento qual cenário será usado como base de cálculo. Cargas marcadas como “Possível” entram apenas no cenário máximo.</p>`;
+
+  return pageHead("Equipamentos e cargas","Levantamento das cargas existentes e das que ainda serão instaladas. Serve para validar a fatura e antecipar a expansão.") +
+    cardRaw("Equipamentos instalados",["in","Dados informados"], tabela) +
+    card("Totais do levantamento",["calc","Cálculo automático"], resumo) +
+    card("Maiores consumidores",["est","Estimativa"], rank, "Estimado por tempo de uso declarado") +
+    cardRaw("Expansão futura",["in","Dados informados"], tfut) +
+    card("Cenários de consumo",["est","Estimativa"], cen);
+}
+
+/* =======================================================================
+   4. LOCAL E TELHADO
+   ======================================================================= */
+function tabLocal(p){
+  const C = calc(p);
+  const loc = `<div class="grid">
+    <div class="subhead">Localização</div>
+    ${fld(p,"local.lat","Latitude",{col:3,type:"number",ph:"-12.2664"})}
+    ${fld(p,"local.lon","Longitude",{col:3,type:"number",ph:"-38.9663"})}
+    ${fld(p,"local.cidade","Cidade de referência",{col:3})}
+    ${fld(p,"local.altitude","Altitude",{col:3,type:"number",unit:"m"})}
+    <div class="subhead">Telhado</div>
+    ${fld(p,"local.cobertura","Tipo de cobertura",{col:3,type:"select",options:["Cerâmica","Fibrocimento","Metálica (trapezoidal)","Metálica (sanduíche)","Laje","Shingle","Solo","Carport","Outra"]})}
+    ${fld(p,"local.material","Material / detalhe",{col:3,ph:"Telha portuguesa, 6 mm..."})}
+    ${fld(p,"local.area","Área disponível",{col:2,type:"number",unit:"m²"})}
+    ${fld(p,"local.comprimento","Comprimento",{col:2,type:"number",unit:"m"})}
+    ${fld(p,"local.largura","Largura",{col:2,type:"number",unit:"m"})}
+    ${fld(p,"local.inclinacao","Inclinação",{col:2,type:"number",unit:"°"})}
+    ${fld(p,"local.azimute","Orientação / azimute",{col:3,type:"number",unit:"° (0 = Norte)",ph:"0"})}
+    ${fld(p,"local.conservacao","Estado de conservação",{col:2,type:"select",options:["Ótimo","Bom","Regular","Ruim"]})}
+    ${fld(p,"local.estrutura","Estrutura aparente",{col:3,ph:"Madeira, metálica, terça a cada 1,2 m..."})}
+    ${fld(p,"local.manutencao","Manutenção antes da instalação",{col:2,type:"select",options:["Não","Sim","Avaliar"]})}
+    <div class="subhead">Instalação</div>
+    ${fld(p,"local.localInversor","Local previsto para o inversor",{col:4,ph:"Área de serviço, parede interna abrigada..."})}
+    ${fld(p,"local.distModInv","Distância módulos → inversor",{col:2,type:"number",unit:"m"})}
+    ${fld(p,"local.distInvQuadro","Distância inversor → quadro",{col:2,type:"number",unit:"m"})}
+    ${fld(p,"local.localQuadro","Local do quadro elétrico",{col:2})}
+    ${fld(p,"local.acesso","Acesso para manutenção",{col:2,type:"select",options:["Fácil","Moderado","Difícil"]})}
+    ${fld(p,"local.obs","Observações do local",{col:12,type:"textarea",ph:"Acesso ao telhado, altura, obstruções, ponto de amarração para linha de vida..."})}
+  </div>`;
+
+  const oc = C.areaMod > 0 && C.nMod > 0
+    ? `<div class="kpis">
+        ${kpi("Área ocupada pelos módulos", dash(C.areaTotal,1), "m²", `${C.nMod} módulo(s)`)}
+        ${kpi("Área informada do telhado", dash(C.areaDisponivel,1), "m²")}
+        ${kpi("Ocupação", C.areaDisponivel?fmt(C.areaTotal/C.areaDisponivel*100,0)+"%":"—","","sem considerar afastamentos")}
+        ${kpi("Área do retângulo informado", dash(num(p.local.comprimento)*num(p.local.largura),1),"m²","comprimento × largura")}
+      </div>`
+    : `<p class="muted">Cadastre as dimensões e a quantidade de módulos para comparar com a área disponível.</p>`;
+
+  const fotos = p.local.fotos.map((f,i)=>`<figure class="photo">
+      <img src="${f.data}" alt="${esc(f.nome)}">
+      <figcaption class="cap">${esc(f.nome)}</figcaption>
+      <button data-act="del-foto" data-i="${i}" title="Remover foto">✕</button>
+    </figure>`).join("");
+
+  const fotoBody = `${p.local.fotos.length?`<div class="photos">${fotos}</div><hr class="sep">`:""}
+    <div class="inline-acts">
+      <label class="btn">Adicionar fotos<input type="file" id="fotoInput" accept="image/*" multiple hidden></label>
+      <span class="muted small">As imagens são reduzidas para caber no armazenamento do navegador.</span>
+    </div>`;
+
+  return pageHead("Local e telhado","Geometria, orientação e condições físicas do local. Define área útil, distâncias de cabo e viabilidade de fixação.") +
+    card("Levantamento do local",["in","Dados informados"], loc) +
+    card("Ocupação do telhado",["calc","Cálculo automático"], oc) +
+    card("Fotos do local",["in","Dados informados"], fotoBody);
+}
+
+/* =======================================================================
+   5. SOMBREAMENTO
+   ======================================================================= */
+function tabSombra(p){
+  const C = calc(p);
+  const rows = p.sombra.obstaculos.map((o,i)=>`<tr>
+    <td style="width:150px"><select data-path="sombra.obstaculos.${i}.tipo">${["Árvore","Prédio","Muro","Antena","Caixa d'água","Chaminé","Torre","Poste","Outra estrutura"].map(c=>`<option${c===o.tipo?" selected":""}>${c}</option>`).join("")}</select></td>
+    <td class="n" style="width:110px"><input type="number" step="any" data-path="sombra.obstaculos.${i}.dist" value="${esc(o.dist)}" placeholder="m"></td>
+    <td class="n" style="width:110px"><input type="number" step="any" data-path="sombra.obstaculos.${i}.alt" value="${esc(o.alt)}" placeholder="m"></td>
+    <td style="width:120px"><select data-path="sombra.obstaculos.${i}.dir">${["Norte","Nordeste","Leste","Sudeste","Sul","Sudoeste","Oeste","Noroeste"].map(c=>`<option${c===o.dir?" selected":""}>${c}</option>`).join("")}</select></td>
+    <td style="width:150px"><select data-path="sombra.obstaculos.${i}.periodo">${["Manhã","Meio-dia","Tarde","Manhã e tarde","Dia todo","Somente inverno"].map(c=>`<option${c===o.periodo?" selected":""}>${c}</option>`).join("")}</select></td>
+    <td class="n num">${(num(o.dist)>0&&num(o.alt)>0)?fmt(Math.atan(num(o.alt)/num(o.dist))*180/Math.PI,0)+"°":"—"}</td>
+    <td><input type="text" data-path="sombra.obstaculos.${i}.obs" value="${esc(o.obs)}" placeholder="—"></td>
+    <td style="width:34px"><button class="rowbtn" data-act="del-obst" data-i="${i}">✕</button></td>
+  </tr>`).join("");
+
+  const tab = `<div class="tablewrap"><table>
+    <thead><tr><th>Tipo</th><th class="n">Distância (m)</th><th class="n">Altura (m)</th><th>Direção</th><th>Sombra em</th><th class="n">Ângulo aparente</th><th>Observação</th><th></th></tr></thead>
+    <tbody>${rows || `<tr class="empty-row"><td colspan="8">Nenhum obstáculo registrado.</td></tr>`}</tbody>
+  </table></div>
+  <div class="body" style="padding-top:12px"><button class="btn" data-act="add-obst">${ICON.plus} Adicionar obstáculo</button></div>`;
+
+  const cls = `<div class="grid">
+    ${fld(p,"sombra.classificacao","Sombreamento geral",{col:3,type:"select",options:["Nenhum","Baixo","Moderado","Alto"]})}
+    ${fld(p,"sombra.perdaEstimada","Perda estimada por sombra",{col:3,type:"number",unit:"%"})}
+    <div class="subhead">Sombra observada por período</div>
+    ${fld(p,"sombra.manha","Manhã",{col:2,type:"select",options:["Não","Parcial","Sim"]})}
+    ${fld(p,"sombra.meioDia","Meio-dia",{col:2,type:"select",options:["Não","Parcial","Sim"]})}
+    ${fld(p,"sombra.tarde","Tarde",{col:2,type:"select",options:["Não","Parcial","Sim"]})}
+    ${fld(p,"sombra.inverno","Inverno",{col:2,type:"select",options:["Não","Parcial","Sim"]})}
+    ${fld(p,"sombra.verao","Verão",{col:2,type:"select",options:["Não","Parcial","Sim"]})}
+    ${fld(p,"sombra.obs","Observações",{col:12,type:"textarea",ph:"Horário exato da sombra, crescimento previsto de árvores, possibilidade de poda ou remoção..."})}
+  </div>`;
+
+  const av = C.sombraCritica
+    ? alertBox("warn","Sombreamento significativo", `Classificado como ${p.sombra.classificacao} com ${C.nObst} obstáculo(s) registrado(s). Considere otimizadores, microinversores, reagrupamento das strings ou remanejamento dos módulos.`)
+    : (C.nObst ? alertBox("info","Sombreamento controlado", `${C.nObst} obstáculo(s) registrado(s), classificados como ${p.sombra.classificacao}.`)
+               : alertBox("ok","Sem sombreamento registrado","Nenhum obstáculo lançado nesta aba."));
+
+  return pageHead("Sombreamento","Obstáculos que projetam sombra sobre a área dos módulos, por período do dia e do ano.") +
+    cardRaw("Obstáculos",["in","Dados informados"], tab, "Ângulo aparente = arctg(altura ÷ distância)") +
+    card("Classificação",["in","Dados informados"], cls) +
+    card("Avaliação",["est","Verificação"], av);
+}
+
+/* =======================================================================
+   6. INSTALAÇÃO ELÉTRICA
+   ======================================================================= */
+function tabEletrica(p){
+  const g = `<div class="grid">
+    <div class="subhead">Padrão de entrada</div>
+    ${fld(p,"eletrica.entrada","Tipo de entrada",{col:3,type:"select",options:["Monofásico","Bifásico","Trifásico"]})}
+    ${fld(p,"eletrica.tensao","Tensão",{col:3,type:"select",options:["127 V","220 V","127/220 V","220/380 V","Outra"]})}
+    ${fld(p,"eletrica.potDisponivel","Potência disponível",{col:3,type:"number",unit:"kW"})}
+    ${fld(p,"eletrica.disjuntor","Disjuntor geral",{col:3,ph:"63 A"})}
+    <div class="subhead">Condutores e conexão</div>
+    ${fld(p,"eletrica.secaoCond","Seção dos condutores",{col:3,type:"number",unit:"mm²"})}
+    ${fld(p,"eletrica.tipoCond","Tipo de condutor",{col:3,type:"select",options:["Cobre","Alumínio"]})}
+    ${fld(p,"eletrica.distConexao","Distância até o ponto de conexão",{col:3,type:"number",unit:"m"})}
+    ${fld(p,"eletrica.aterramento","Aterramento",{col:3,type:"select",options:["Existente","Inexistente","A verificar"]})}
+    <div class="subhead">Quadro elétrico</div>
+    ${fld(p,"eletrica.quadro","Quadro elétrico",{col:3,ph:"QGBT embutido, 24 módulos"})}
+    ${fld(p,"eletrica.estadoQuadro","Estado do quadro",{col:2,type:"select",options:["Ótimo","Bom","Regular","Ruim"]})}
+    ${fld(p,"eletrica.espaco","Espaço disponível",{col:2,type:"select",options:["Sim","Limitado","Não"]})}
+    ${fld(p,"eletrica.barramento","Barramento",{col:3,ph:"Trifásico 100 A"})}
+    ${fld(p,"eletrica.adequacao","Necessita adequação elétrica?",{col:2,type:"select",options:["Não","Sim","Avaliar"]})}
+    ${fld(p,"eletrica.obs","Observações",{col:12,type:"textarea",ph:"Condição dos cabos, aquecimento, ramal de entrada, poste particular, padrão a trocar..."})}
+  </div>`;
+  const st = p.eletrica.adequacao === "Sim"
+    ? alertBox("warn","Adequação elétrica necessária", p.eletrica.obs || "Detalhe o escopo no campo de observações.")
+    : p.eletrica.adequacao === "Avaliar"
+      ? alertBox("info","Adequação a avaliar","Defina antes de fechar o dimensionamento — pode alterar custo e prazo.")
+      : alertBox("ok","Instalação compatível","Nenhuma adequação registrada.");
+  return pageHead("Instalação elétrica","Condições do padrão de entrada, quadro e condutores existentes no ponto de conexão.") +
+    card("Levantamento elétrico",["in","Dados informados"], g) +
+    card("Situação",["est","Verificação"], st);
+}
+/* =======================================================================
+   7. DIMENSIONAMENTO SOLAR
+   ======================================================================= */
+const AVISO_PRE = `<div class="disclaimer">Pré-dimensionamento — resultado sujeito à validação técnica. Não substitui o projeto executivo, a memória de cálculo nem a simulação com base de irradiação oficial.</div>`;
+
+function tabDim(p){
+  const C = calc(p);
+  const ent = `<div class="grid">
+    ${fld(p,"dim.baseConsumo","Base de consumo",{col:3,type:"select",options:["Média 12 meses","Média dos últimos 3 meses","Média dos últimos 6 meses","Maior consumo do ano","Cenário futuro provável","Cenário futuro máximo","Valor manual"]})}
+    ${fld(p,"dim.consumoManual","Consumo manual",{col:3,type:"number",unit:"kWh/mês"})}
+    ${fld(p,"dim.hsp","HSP média",{col:2,type:"number",unit:"h/dia",ph:"5,20"})}
+    ${fld(p,"dim.pr","Performance Ratio (PR)",{col:2,type:"number",step:"0.01",ph:"0,78"})}
+    ${fld(p,"dim.perdas","Perdas adicionais",{col:2,type:"number",unit:"%"})}
+    ${fld(p,"dim.compensacao","Compensação desejada",{col:2,type:"number",unit:"%"})}
+    ${fld(p,"dim.descontarDisp","Descontar custo de disponibilidade",{col:3,type:"select",options:["Sim","Não"]})}
+    ${fld(p,"dim.obs","Premissas adotadas",{col:9,type:"textarea",rows:2,ph:"Fonte da HSP, inclinação considerada, perdas por sujidade, temperatura, mismatch..."})}
+  </div>`;
+
+  const res = `<div class="kpis">
+    ${kpi("Consumo base", dash(C.consumoBase,0), "kWh/mês", p.dim.baseConsumo)}
+    ${kpi("Energia a compensar", dash(C.energiaAlvo,0), "kWh/mês", `${fmt(C.compensacaoAlvo,0)}%${p.dim.descontarDisp==="Sim"&&C.custoDisp?` · −${fmt(C.custoDisp,0)} kWh disp.`:""}`)}
+    ${kpi("PR efetivo", C.prEf?fmt(C.prEf,3):"—","",`PR ${fmt(C.pr,2)} × (1 − ${fmt(C.perdas,0)}%)`)}
+    ${kpi("Potência FV necessária", dash(C.potNecessaria,2), "kWp", "E ÷ (HSP × 30 × PR)", true)}
+    ${kpi("Potência FV cadastrada", dash(C.potFV,2), "kWp", C.nMod?`${C.nMod} módulos`:"aba Módulos")}
+    ${kpi("Módulos necessários", C.modNecessarios||"—","un",C.potMod?`de ${fmt(C.potMod,0)} Wp`:"defina o módulo")}
+    ${kpi("Geração mensal estimada", dash(C.geracaoMedia,0), "kWh", "com a potência cadastrada")}
+    ${kpi("Geração anual estimada", dash(C.geracaoAnual,0), "kWh")}
+  </div>
+  <hr class="sep">
+  <p class="note">E ≈ P<sub>FV</sub> × HSP × PR — a geração mensal usa os dias reais de cada mês e a HSP mensal quando informada.</p>`;
+
+  const hspm = `<div class="tablewrap"><table>
+    <thead><tr><th>Mês</th>${MESES_C.map(m=>`<th class="n">${m}</th>`).join("")}</tr></thead>
+    <tbody><tr><td>HSP (h/dia)</td>${MESES.map((_,i)=>`<td class="n" style="min-width:64px"><input type="number" step="any" data-path="dim.hspMensal.${i}" value="${esc(p.dim.hspMensal[i])}" placeholder="${p.dim.hsp||"—"}"></td>`).join("")}</tr></tbody>
+  </table></div>
+  <div class="body" style="padding-top:12px"><p class="muted small">Opcional. Sem preenchimento, todos os meses usam a HSP média. Campos em branco assumem o valor médio.</p></div>`;
+
+  return pageHead("Dimensionamento solar","Pré-dimensionamento a partir do consumo base, da irradiação local e do desempenho esperado.") +
+    card("Premissas de cálculo",["in","Dados informados"], ent) +
+    card("Resultado do pré-dimensionamento",["est","Estimativa"], res) +
+    cardRaw("HSP por mês",["in","Dados informados"], hspm) +
+    `<div style="margin-bottom:16px">${AVISO_PRE}</div>`;
+}
+
+/* =======================================================================
+   8. MÓDULOS
+   ======================================================================= */
+function tabModulo(p){
+  const C = calc(p);
+  const g = `<div class="grid">
+    <div class="subhead">Identificação</div>
+    ${fld(p,"modulo.fab","Fabricante",{col:3})}
+    ${fld(p,"modulo.modelo","Modelo",{col:3})}
+    ${fld(p,"modulo.pot","Potência nominal",{col:2,type:"number",unit:"Wp"})}
+    ${fld(p,"modulo.efic","Eficiência",{col:2,type:"number",unit:"%"})}
+    ${fld(p,"modulo.garantia","Garantia",{col:2,ph:"12 anos / 25 anos"})}
+    <div class="subhead">Parâmetros elétricos (STC)</div>
+    ${fld(p,"modulo.voc","V_OC",{col:2,type:"number",unit:"V"})}
+    ${fld(p,"modulo.vmp","V_MP",{col:2,type:"number",unit:"V"})}
+    ${fld(p,"modulo.isc","I_SC",{col:2,type:"number",unit:"A"})}
+    ${fld(p,"modulo.imp","I_MP",{col:2,type:"number",unit:"A"})}
+    ${fld(p,"modulo.coefVoc","Coef. de temperatura de V_OC",{col:2,type:"number",unit:"%/°C"})}
+    ${fld(p,"modulo.coefVmp","Coef. de temperatura de V_MP",{col:2,type:"number",unit:"%/°C"})}
+    <div class="subhead">Físico e quantidade</div>
+    ${fld(p,"modulo.comp","Comprimento",{col:2,type:"number",unit:"mm"})}
+    ${fld(p,"modulo.larg","Largura",{col:2,type:"number",unit:"mm"})}
+    ${fld(p,"modulo.peso","Peso unitário",{col:2,type:"number",unit:"kg"})}
+    ${fld(p,"modulo.qtd","Quantidade de módulos",{col:3,type:"number",unit:"un"})}
+  </div>`;
+
+  const r = `<div class="kpis">
+    ${kpi("Número de módulos", C.nMod||"—","un")}
+    ${kpi("Potência unitária", dash(C.potMod,0), "Wp")}
+    ${kpi("Potência total", dash(C.potFV,2), "kWp", "P_FV = N × P_módulo", true)}
+    ${kpi("Área ocupada", dash(C.areaTotal,1), "m²", C.areaMod?`${fmt(C.areaMod,2)} m² por módulo`:"")}
+    ${kpi("Peso total aproximado", dash(C.pesoTotal,0), "kg", C.areaTotal?`${fmt(C.pesoTotal/C.areaTotal,1)} kg/m²`:"")}
+    ${kpi("Densidade de potência", dash(C.densidade,3), "kWp/m²")}
+    ${kpi("Sugestão do dimensionamento", C.modNecessarios||"—","un","para a compensação desejada")}
+    ${kpi("Diferença", C.modNecessarios&&C.nMod?`${C.nMod-C.modNecessarios>0?"+":""}${C.nMod-C.modNecessarios}`:"—","un","cadastrados − necessários")}
+  </div>`;
+
+  const av = [];
+  if(C.areaDisponivel > 0 && C.areaTotal > C.areaDisponivel)
+    av.push(alertBox("err","Área insuficiente",`Ocupação de ${fmt(C.areaTotal,1)} m² contra ${fmt(C.areaDisponivel,1)} m² informados no telhado.`));
+  if(C.pesoTotal > 0 && C.areaTotal > 0 && (C.pesoTotal/C.areaTotal) > 20)
+    av.push(alertBox("warn","Carga sobre a cobertura elevada",`${fmt(C.pesoTotal/C.areaTotal,1)} kg/m² apenas de módulos, sem estrutura. Avaliação estrutural recomendada.`));
+  if(!av.length) av.push(alertBox("ok","Sem restrições detectadas","Área e carga compatíveis com o que foi informado."));
+
+  return pageHead("Módulos","Dados de placa do módulo escolhido e quantidade prevista. Alimenta os cálculos de string, área e geração.") +
+    card("Módulo fotovoltaico",["in","Dados informados"], g) +
+    card("Resultado do arranjo",["calc","Cálculo automático"], r) +
+    card("Verificações",["est","Verificação"], av.join("")) ;
+}
+
+/* =======================================================================
+   9. STRINGS
+   ======================================================================= */
+function tabStrings(p){
+  const C = calc(p);
+  const g = `<div class="grid">
+    ${fld(p,"strings.modPorString","Módulos por string",{col:3,type:"number",unit:"un"})}
+    ${fld(p,"strings.nStrings","Número de strings",{col:3,type:"number",unit:"un"})}
+    ${fld(p,"strings.tmin","Temperatura mínima da célula",{col:3,type:"number",unit:"°C",ph:"5"})}
+    ${fld(p,"strings.tmaxCel","Temperatura máxima da célula",{col:3,type:"number",unit:"°C",ph:"70"})}
+  </div>
+  <hr class="sep">
+  <div class="tablewrap"><table>
+    <thead><tr><th>Parâmetro do módulo</th><th class="n">STC</th><th class="n">Corrigido</th><th>Origem</th></tr></thead>
+    <tbody>
+      <tr><td>V_OC</td><td class="n num">${dash(num(p.modulo.voc),2)} V</td><td class="n num">${dash(C.vocFrioMod,2)} V</td><td class="small muted">a ${fmt(C.tmin,0)} °C · coef. ${fmt(num(p.modulo.coefVoc),2)} %/°C</td></tr>
+      <tr><td>V_MP</td><td class="n num">${dash(num(p.modulo.vmp),2)} V</td><td class="n num">${dash(C.vmpQuenteMod,2)} V</td><td class="small muted">a ${fmt(C.tmaxCel,0)} °C · coef. ${fmt(num(p.modulo.coefVmp),2)} %/°C</td></tr>
+      <tr><td>I_SC</td><td class="n num">${dash(num(p.modulo.isc),2)} A</td><td class="n num">—</td><td class="small muted">adotado o valor STC</td></tr>
+      <tr><td>I_MP</td><td class="n num">${dash(num(p.modulo.imp),2)} A</td><td class="n num">—</td><td class="small muted">adotado o valor STC</td></tr>
+    </tbody>
+  </table></div>`;
+
+  const r = `<div class="kpis">
+    ${kpi("V_string nominal", dash(C.vStringNom,1), "V", "N_s × V_MP")}
+    ${kpi("V_OC,string nominal", dash(C.vocStringNom,1), "V", "N_s × V_OC")}
+    ${kpi("V_OC,string a frio", dash(C.vocStringFrio,1), "V", `${fmt(C.tmin,0)} °C — pior caso`, true)}
+    ${kpi("V_MP,string a quente", dash(C.vmpStringQuente,1), "V", `${fmt(C.tmaxCel,0)} °C`)}
+    ${kpi("I_string", dash(C.iString,2), "A", "≈ I_MP")}
+    ${kpi("I_SC,string", dash(C.iscString,2), "A")}
+    ${kpi("Corrente total CC", dash(C.iTotalDC,2), "A", `${C.nst||0} string(s)`)}
+    ${kpi("Módulos nas strings", C.modEmStrings||"—","un",`potência por string ${fmt(C.potStrings,2)} kWp`)}
+  </div>`;
+
+  const chk = C.chk.length
+    ? C.chk.map(c => alertBox(c.ok?"ok":"err", c.ok?"Compatível":"Incompatibilidade", c.txt)).join("")
+    : `<p class="muted">Cadastre o módulo, o inversor e o arranjo das strings para rodar as verificações.</p>`;
+
+  return pageHead("Strings","Arranjo série/paralelo e correção de tensão por temperatura. As verificações usam os limites do inversor cadastrado.") +
+    card("Arranjo e temperaturas",["in","Dados informados"], g) +
+    card("Tensões e correntes da string",["calc","Cálculo automático"], r) +
+    card("Compatibilidade com o inversor",["est","Verificação"], chk) +
+    `<div style="margin-bottom:16px">${AVISO_PRE}</div>`;
+}
+
+/* =======================================================================
+   10. INVERSOR
+   ======================================================================= */
+function tabInversor(p){
+  const C = calc(p);
+  const g = `<div class="grid">
+    <div class="subhead">Identificação</div>
+    ${fld(p,"inv.fab","Fabricante",{col:3})}
+    ${fld(p,"inv.modelo","Modelo",{col:3})}
+    ${fld(p,"inv.potAC","Potência nominal CA",{col:2,type:"number",unit:"kW"})}
+    ${fld(p,"inv.efic","Eficiência máxima",{col:2,type:"number",unit:"%"})}
+    <div class="subhead">Entrada CC</div>
+    ${fld(p,"inv.vdcMax","Tensão máxima CC",{col:2,type:"number",unit:"V"})}
+    ${fld(p,"inv.mpptMin","Faixa MPPT — mínima",{col:2,type:"number",unit:"V"})}
+    ${fld(p,"inv.mpptMax","Faixa MPPT — máxima",{col:2,type:"number",unit:"V"})}
+    ${fld(p,"inv.nMppt","Número de MPPTs",{col:2,type:"number",unit:"un"})}
+    ${fld(p,"inv.iMaxMppt","Corrente máxima por MPPT",{col:2,type:"number",unit:"A"})}
+    ${fld(p,"inv.maxStrings","Máximo de strings",{col:2,type:"number",unit:"un"})}
+    <div class="subhead">Instalação</div>
+    ${fld(p,"inv.ip","Grau de proteção",{col:3,ph:"IP65"})}
+    ${fld(p,"inv.tempOp","Temperatura de operação",{col:3,ph:"-25 a 60 °C"})}
+  </div>`;
+
+  const r = `<div class="kpis">
+    ${kpi("Potência FV", dash(C.potFV,2), "kWp")}
+    ${kpi("Potência CA", dash(C.potAC,2), "kW")}
+    ${kpi("Relação DC/CA", C.dcac?fmt(C.dcac,2):"—","","P_FV ÷ P_CA", true)}
+    ${kpi("Strings por MPPT", C.stringsPorMppt||"—","un",C.nMppt?`${C.nst} string(s) em ${C.nMppt} MPPT(s)`:"")}
+    ${kpi("Corrente por MPPT", dash(C.iPorMppt,2), "A", C.iMaxMppt?`limite ${fmt(C.iMaxMppt,1)} A`:"")}
+    ${kpi("Margem de tensão CC", (C.vdcMax&&C.vocStringFrio)?fmt((1-C.vocStringFrio/C.vdcMax)*100,0)+"%":"—","","até o limite do inversor")}
+  </div>`;
+
+  const chk = C.chk.length
+    ? C.chk.map(c => alertBox(c.ok?"ok":"err", c.ok?"Compatível":"Incompatibilidade", c.txt)).join("")
+    : `<p class="muted">Preencha os dados do módulo, das strings e do inversor para rodar as verificações.</p>`;
+
+  return pageHead("Inversor","Dados de placa do inversor e conferência de potência, tensão, corrente e número de entradas.") +
+    card("Inversor",["in","Dados informados"], g) +
+    card("Compatibilidade do conjunto",["calc","Cálculo automático"], r) +
+    card("Verificações automáticas",["est","Verificação"], chk);
+}
+
+/* =======================================================================
+   11. CABOS E PROTEÇÕES
+   ======================================================================= */
+function tabCabos(p){
+  const C = calc(p);
+  const dc = `<div class="grid">
+    ${fld(p,"cabos.dc.comp","Comprimento do circuito CC",{col:3,type:"number",unit:"m"})}
+    ${fld(p,"cabos.dc.secao","Seção",{col:2,type:"number",unit:"mm²",ph:"4"})}
+    ${fld(p,"cabos.dc.corrente","Corrente de projeto",{col:2,type:"number",unit:"A",ph:String(fmt(C.iString,2))})}
+    ${fld(p,"cabos.dc.tipo","Tipo de cabo",{col:5,type:"select",options:["Cabo solar 1,5 kV","Cabo solar 1,0 kV","Outro"]})}
+  </div>
+  <hr class="sep">
+  <div class="kpis">
+    ${kpi("Corrente adotada", dash(C.idc,2), "A", has(p.cabos.dc.corrente)?"informada":"I_MP da string")}
+    ${kpi("Queda de tensão", dash(C.dvDC,2), "V", "ΔV = 2 × ρ × L × I ÷ S")}
+    ${kpi("Queda percentual", C.dvDCpct?fmt(C.dvDCpct,2)+"%":"—","",`sobre ${dash(C.vStringNom,0)} V`, true)}
+  </div>`;
+
+  const ac = `<div class="grid">
+    ${fld(p,"cabos.ac.comp","Comprimento do circuito CA",{col:3,type:"number",unit:"m"})}
+    ${fld(p,"cabos.ac.secao","Seção",{col:2,type:"number",unit:"mm²",ph:"6"})}
+    ${fld(p,"cabos.ac.corrente","Corrente de projeto",{col:2,type:"number",unit:"A",ph:String(fmt(C.iac,2))})}
+    ${fld(p,"cabos.ac.tensao","Tensão",{col:2,type:"number",unit:"V"})}
+    ${fld(p,"cabos.ac.fases","Ligação",{col:3,type:"select",options:["Monofásico","Bifásico","Trifásico"]})}
+  </div>
+  <hr class="sep">
+  <div class="kpis">
+    ${kpi("Corrente adotada", dash(C.iac,2), "A", has(p.cabos.ac.corrente)?"informada":"calculada pela potência CA")}
+    ${kpi("Queda de tensão", dash(C.dvAC,2), "V", p.cabos.ac.fases==="Trifásico"?"ΔV = √3 × ρ × L × I ÷ S":"ΔV = 2 × ρ × L × I ÷ S")}
+    ${kpi("Queda percentual", C.dvACpct?fmt(C.dvACpct,2)+"%":"—","",`sobre ${fmt(num(p.cabos.ac.tensao)||220,0)} V`, true)}
+  </div>`;
+
+  const prot = `<div class="grid">
+    <div class="subhead">Lado CC</div>
+    ${fld(p,"cabos.disjDC","Disjuntor CC",{col:4,ph:"—"})}
+    ${fld(p,"cabos.seccDC","Seccionamento CC",{col:4,ph:"Chave seccionadora 1000 V"})}
+    ${fld(p,"cabos.dpsDC","DPS CC",{col:4,ph:"Classe II, 1000 V"})}
+    <div class="subhead">Lado CA</div>
+    ${fld(p,"cabos.disjAC","Disjuntor CA",{col:4,ph:"25 A curva C"})}
+    ${fld(p,"cabos.seccAC","Seccionamento CA",{col:4})}
+    ${fld(p,"cabos.dpsAC","DPS CA",{col:4,ph:"Classe II, 275 V"})}
+    ${fld(p,"cabos.obs","Observações",{col:12,type:"textarea",rows:2,ph:"Eletroduto, percurso, string box, aterramento dos perfis..."})}
+  </div>`;
+
+  const av = [];
+  if(C.dvDCpct > 2 && C.dvDC > 0) av.push(alertBox("warn","Queda CC acima de 2%",`${fmt(C.dvDCpct,2)}% — reavalie a seção ou o percurso.`));
+  if(C.dvACpct > 3 && C.dvAC > 0) av.push(alertBox("warn","Queda CA acima de 3%",`${fmt(C.dvACpct,2)}% — reavalie a seção ou o percurso.`));
+  if(!av.length && (C.dvDC > 0 || C.dvAC > 0)) av.push(alertBox("ok","Quedas de tensão dentro do usual","CC até 2% e CA até 3% nos trechos informados."));
+  if(!av.length) av.push(alertBox("info","Sem dados suficientes","Informe comprimento e seção para calcular a queda de tensão."));
+
+  return pageHead("Cabos e proteções","Conferência dos circuitos CC e CA e registro dos dispositivos de proteção previstos.") +
+    card("Circuito CC",["in","Dados informados"], dc, "Cobre — ρ = 0,0172 Ω·mm²/m") +
+    card("Circuito CA",["in","Dados informados"], ac, `${p.eletrica.tipoCond} — ρ = ${p.eletrica.tipoCond==="Alumínio"?"0,0282":"0,0172"} Ω·mm²/m`) +
+    card("Dispositivos de proteção",["in","Dados informados"], prot) +
+    card("Verificações",["est","Verificação"], av.join(""));
+}
+
+/* =======================================================================
+   12. ESTRUTURA
+   ======================================================================= */
+function tabEstrutura(p){
+  const C = calc(p);
+  const g = `<div class="grid">
+    ${fld(p,"estrutura.telhado","Tipo de telhado",{col:3,type:"select",options:["Cerâmica","Fibrocimento","Metálica (trapezoidal)","Metálica (sanduíche)","Laje","Shingle","Solo","Carport","Outra"]})}
+    ${fld(p,"estrutura.tipo","Tipo de estrutura",{col:3,type:"select",options:["Perfil de alumínio","Trilho curto","Estrutura para laje (triangular)","Solo (mesa fixa)","Carport","Outra"]})}
+    ${fld(p,"estrutura.material","Material",{col:3,ph:"Alumínio + parafusos inox"})}
+    ${fld(p,"estrutura.fixacao","Tipo de fixação",{col:3,type:"select",options:["Gancho (telha cerâmica)","Parafuso estrutural","Mini trilho / grampo","Presilha metálica","Base com lastro","Estaca / fundação","Outra"]})}
+    ${fld(p,"estrutura.pontos","Pontos de fixação (aprox.)",{col:3,type:"number",unit:"un"})}
+    ${fld(p,"estrutura.estadoCobertura","Estado da cobertura",{col:3,type:"select",options:["Ótimo","Bom","Regular","Ruim"]})}
+    ${fld(p,"estrutura.reforco","Necessidade de reforço",{col:3,type:"select",options:["Não","Sim","Avaliar"]})}
+    ${fld(p,"estrutura.avaliacao","Avaliação estrutural",{col:3,type:"select",options:["Adequada","Necessita avaliação","Necessita reforço"]})}
+    ${fld(p,"estrutura.obs","Observações",{col:12,type:"textarea",ph:"Vão entre terças, madeiramento, corrosão, idade da cobertura, necessidade de laudo..."})}
+  </div>`;
+
+  const carga = `<div class="kpis">
+    ${kpi("Peso dos módulos", dash(C.pesoTotal,0), "kg", `${C.nMod||0} módulo(s)`)}
+    ${kpi("Carga distribuída", C.areaTotal?fmt(C.pesoTotal/C.areaTotal,1):"—","kg/m²","sem estrutura e fixações")}
+    ${kpi("Pontos de fixação", num(p.estrutura.pontos)||"—","un", C.nMod&&num(p.estrutura.pontos)?`${fmt(num(p.estrutura.pontos)/C.nMod,1)} por módulo`:"")}
+    ${kpi("Carga por ponto", (num(p.estrutura.pontos)&&C.pesoTotal)?fmt(C.pesoTotal/num(p.estrutura.pontos),1):"—","kg","estimativa estática")}
+  </div>`;
+
+  const av = p.estrutura.avaliacao === "Adequada" && p.estrutura.reforco === "Não"
+    ? alertBox("ok","Estrutura adequada","Nenhuma restrição registrada para a instalação.")
+    : alertBox("warn",`Estrutura: ${p.estrutura.avaliacao}`, p.estrutura.obs || "Registre o escopo da avaliação ou do reforço antes de fechar o projeto.");
+
+  return pageHead("Estrutura","Fixação, cobertura e condição do madeiramento ou da estrutura de apoio.") +
+    card("Levantamento estrutural",["in","Dados informados"], g) +
+    card("Carga estimada",["est","Estimativa"], carga, "Peso de módulos apenas — desconsidera perfis, fixações e esforço de vento") +
+    card("Situação",["est","Verificação"], av);
+}
+
+/* =======================================================================
+   13. GERAÇÃO
+   ======================================================================= */
+function tabGeracao(p){
+  const C = calc(p);
+  const k = `<div class="kpis">
+    ${kpi("Potência instalada", dash(C.potFV,2), "kWp", `${C.nMod||0} módulos de ${fmt(C.potMod,0)} Wp`, true)}
+    ${kpi("Potência do inversor", dash(C.potAC,2), "kW", p.inv.modelo||"")}
+    ${kpi("Relação DC/CA", C.dcac?fmt(C.dcac,2):"—")}
+    ${kpi("HSP média", dash(C.hsp,2), "h/dia")}
+    ${kpi("PR efetivo", C.prEf?fmt(C.prEf,3):"—")}
+    ${kpi("Geração mensal média", dash(C.geracaoMedia,0), "kWh")}
+    ${kpi("Geração anual", dash(C.geracaoAnual,0), "kWh", C.geracaoAnual?`${fmt(C.geracaoAnual/1000,2)} MWh/ano`:"")}
+    ${kpi("Consumo médio", dash(C.consumoBase||C.consumoMedio,0), "kWh/mês")}
+    ${kpi("Compensação estimada", C.compensacaoReal?fmt(C.compensacaoReal,0)+"%":"—","","geração anual ÷ consumo anual", true)}
+    ${kpi("Energia específica", dash(C.energiaEspecifica,0), "kWh/kWp·ano")}
+  </div>`;
+
+  const graf = barChart(MESES_C, [
+      {name:"Consumo", color:"#9aa8b5", values:C.kwhSerie},
+      {name:"Geração estimada", color:"#17557a", values:C.geracaoMensal}
+    ], {height:250});
+
+  const tab = `<div class="tablewrap"><table>
+    <thead><tr><th>Mês</th><th class="n">HSP (h/dia)</th><th class="n">Dias</th><th class="n">Geração (kWh)</th><th class="n">Consumo (kWh)</th><th class="n">Saldo (kWh)</th></tr></thead>
+    <tbody>${MESES.map((m,i)=>{
+      const h = has(p.dim.hspMensal[i]) ? num(p.dim.hspMensal[i]) : C.hsp;
+      const g = C.geracaoMensal[i], c = C.kwhSerie[i], s = g - c;
+      return `<tr><td>${m}</td><td class="n num">${dash(h,2)}</td><td class="n num">${DIAS_MES[i]}</td>
+        <td class="n num">${dash(g,0)}</td><td class="n num">${dash(c,0)}</td>
+        <td class="n num" style="color:${s<0?"var(--danger)":"var(--ok)"}">${g||c?fmt(s,0):"—"}</td></tr>`;
+    }).join("")}</tbody>
+    <tfoot><tr><td>Ano</td><td class="n num">—</td><td class="n num">365</td><td class="n num">${dash(C.geracaoAnual,0)}</td>
+      <td class="n num">${dash(C.consumoAnual,0)}</td>
+      <td class="n num">${(C.geracaoAnual||C.consumoAnual)?fmt(C.geracaoAnual-C.consumoAnual,0):"—"}</td></tr></tfoot>
+  </table></div>`;
+
+  return pageHead("Geração","Estimativa mensal de geração comparada ao histórico de consumo.") +
+    card("Resultados do sistema",["calc","Cálculo automático"], k) +
+    card("Consumo × geração",["est","Estimativa"], graf) +
+    cardRaw("Detalhamento mensal",["est","Estimativa"], tab) +
+    `<div style="margin-bottom:16px">${AVISO_PRE}</div>`;
+}
+
+/* =======================================================================
+   14. RESUMO DO PROJETO
+   ======================================================================= */
+function tabResumo(p){
+  const C = calc(p), comp = completude(p), A = alertas(p);
+  const cards = `<div class="kpis">
+    ${kpi("Consumo médio", dash(C.consumoMedio,0), "kWh/mês", `${C.mesesInformados}/12 meses informados`, true)}
+    ${kpi("Potência FV", dash(C.potFV,2), "kWp", C.potNecessaria?`necessária ${fmt(C.potNecessaria,2)} kWp`:"")}
+    ${kpi("Módulos", C.nMod||"—","un", C.potMod?`${fmt(C.potMod,0)} Wp cada`:"")}
+    ${kpi("Inversor", dash(C.potAC,2), "kW", C.dcac?`DC/CA ${fmt(C.dcac,2)}`:"")}
+    ${kpi("Geração anual", C.geracaoAnual?fmt(C.geracaoAnual/1000,2):"—","MWh/ano", C.geracaoMedia?`${fmt(C.geracaoMedia,0)} kWh/mês`:"")}
+    ${kpi("Compensação", C.compensacaoReal?fmt(C.compensacaoReal,0)+"%":"—","","estimada", true)}
+  </div>`;
+
+  const nomes = {ident:"Identificação",consumo:"Consumo",equip:"Equipamentos",local:"Local e telhado",sombra:"Sombreamento",
+    eletrica:"Instalação elétrica",dim:"Dimensionamento",modulo:"Módulos",strings:"Strings",inv:"Inversor",
+    cabos:"Cabos e proteções",estrutura:"Estrutura"};
+  const lista = Object.keys(nomes).map(k=>{
+    const c = comp[k], cls = c.pct >= 100 ? "full" : c.pct > 0 ? "part" : "none";
+    const txt = c.pct >= 100 ? "Completo" : c.pct > 0 ? `${c.pct}%` : "Pendente";
+    return `<div><a data-act="aba" data-tab="${k}" style="cursor:pointer;color:inherit;text-decoration:none">${nomes[k]}</a><span class="st ${cls}">${txt}</span></div>`;
+  }).join("");
+
+  const ficha = `<div class="tablewrap"><table>
+    <tbody>
+      <tr><th style="width:230px">Cliente</th><td>${esc(p.ident.cliente||"—")}</td><th style="width:200px">Tipo</th><td>${esc(p.ident.tipo)}</td></tr>
+      <tr><th>Local</th><td>${esc([p.ident.cidade,p.ident.estado].filter(Boolean).join("/")||"—")}</td><th>Status</th><td>${esc(p.ident.status)}</td></tr>
+      <tr><th>Responsável</th><td>${esc(p.ident.responsavel||"—")}</td><th>Data da visita</th><td>${dateBR(p.ident.dataVisita)}</td></tr>
+      <tr><th>Módulo</th><td>${esc([p.modulo.fab,p.modulo.modelo].filter(Boolean).join(" ")||"—")}</td><th>Inversor</th><td>${esc([p.inv.fab,p.inv.modelo].filter(Boolean).join(" ")||"—")}</td></tr>
+      <tr><th>Arranjo</th><td>${C.ns&&C.nst?`${C.nst} string(s) × ${C.ns} módulos`:"—"}</td><th>Sombreamento</th><td>${esc(p.sombra.classificacao)}</td></tr>
+      <tr><th>Estrutura</th><td>${esc(p.estrutura.avaliacao)}</td><th>Adequação elétrica</th><td>${esc(p.eletrica.adequacao)}</td></tr>
+    </tbody></table></div>`;
+
+  const erros = A.filter(a=>a.kind==="err").length, avisos = A.filter(a=>a.kind==="warn").length;
+
+  return pageHead("Resumo do projeto","Visão consolidada, situação do preenchimento e inconsistências detectadas automaticamente.") +
+    card("Números do projeto",["calc","Cálculo automático"], cards) +
+    cardRaw("Ficha técnica",["in","Dados informados"], ficha) +
+    `<section class="card"><header><h2>Situação do projeto</h2><span class="badge calc">Cálculo automático</span>
+      <span class="spacer"></span><span class="hint">${comp.total}% completo</span></header>
+      <div class="body" style="padding-bottom:12px">
+        <div class="progress${comp.total>=100?" ok":""}"><i style="width:${comp.total}%"></i></div>
+      </div>
+      <div class="checklist">${lista}</div></section>` +
+    card(`Alertas do projeto`, erros?["err",`${erros} incompatibilidade(s)`]:(avisos?["est",`${avisos} ponto(s) de atenção`]:["ok","Sem pendências"]),
+      `<div class="alerts">${A.map(a=>alertBox(a.kind, a.t, a.d)).join("")}</div>`) +
+    card("Exportar", ["in","Saída"], `<div class="inline-acts">
+        <button class="btn primary" data-act="relatorio" data-id="${p.id}">Gerar relatório</button>
+        <button class="btn" data-act="exportar-json" data-id="${p.id}">Exportar JSON</button>
+        <button class="btn" data-act="exportar-csv" data-id="${p.id}">Exportar CSV</button>
+        <button class="btn" data-act="duplicar" data-id="${p.id}">Duplicar sistema</button>
+      </div>
+      <p class="note" style="margin-top:12px">O relatório abre em nova janela já formatado para impressão — use “Salvar como PDF” na caixa de impressão do navegador.</p>`) +
+    `<div style="margin-bottom:16px">${AVISO_PRE}</div>`;
+}
+/* =======================================================================
+   RENDERIZAÇÃO E EVENTOS
+   ======================================================================= */
+const APP = document.getElementById("app");
+
+function render(){
+  const y = window.scrollY;
+  APP.innerHTML = (view === "home") ? renderHome() : renderProjeto();
+  window.scrollTo(0, view === "home" ? 0 : y);
+  bindFotoInput();
+}
+function rerenderTab(keepFocus){
+  const p = proj(); if(!p) return;
+  const box = document.getElementById("content"); if(!box) return;
+  const sc = window.scrollY;
+  box.innerHTML = renderTab(p);
+  atualizarSidebar();
+  bindFotoInput();
+  window.scrollTo(0, sc);
+  if(keepFocus){
+    const el = box.querySelector(`[data-path="${keepFocus}"]`);
+    if(el){ el.focus(); if(el.setSelectionRange && el.type === "text"){ const v = el.value; el.setSelectionRange(v.length, v.length); } }
+  }
+}
+function atualizarSidebar(){
+  const p = proj(); if(!p) return;
+  const comp = completude(p);
+  document.querySelectorAll(".nav a").forEach(a=>{
+    const c = comp[a.dataset.tab]; if(!c) return;
+    const d = a.querySelector(".dot"); if(!d) return;
+    d.className = "dot " + (a.dataset.tab === "resumo" ? "" : (c.pct >= 100 ? "full" : c.pct > 0 ? "part" : ""));
+  });
+  const bar = document.querySelector(".progress-wrap .progress > i");
+  const lbl = document.querySelector(".progress-wrap .prog-label b");
+  if(bar){ bar.style.width = comp.total + "%"; bar.parentElement.classList.toggle("ok", comp.total >= 100); }
+  if(lbl) lbl.textContent = comp.total + "% completo";
+}
+
+/* --- entrada de dados --- */
+let inputT = null;
+APP.addEventListener("input", e=>{
+  const el = e.target.closest("[data-path]"); if(!el) return;
+  const p = proj(); if(!p) return;
+  setPath(p, el.dataset.path, el.value);
+  clearTimeout(inputT);
+  inputT = setTimeout(()=>{ salvar(); atualizarSidebar(); }, 400);
+});
+APP.addEventListener("change", e=>{
+  const el = e.target.closest("[data-path]"); if(!el) return;
+  const p = proj(); if(!p) return;
+  setPath(p, el.dataset.path, el.value);
+  if(el.dataset.path === "ident.projeto" && el.value.trim()){
+    p.nome = el.value.trim(); salvar(); render(); return;
+  }
+  salvar();
+  rerenderTab(el.tagName === "SELECT" ? el.dataset.path : null);
+});
+
+/* --- ações --- */
+APP.addEventListener("click", e=>{
+  const btn = e.target.closest("[data-act]"); if(!btn) return;
+  const act = btn.dataset.act, id = btn.dataset.id, i = +btn.dataset.i;
+  const p = id ? DB.projetos.find(x=>x.id===id) : proj();
+
+  switch(act){
+    case "novo": modalNovo(); break;
+    case "importar": importarArquivo(); break;
+    case "home": view = "home"; curId = null; render(); break;
+    case "abrir": curId = id; curTab = "ident"; view = "projeto"; render(); window.scrollTo(0,0); break;
+    case "aba": curTab = btn.dataset.tab; render(); window.scrollTo(0,0); break;
+    case "renomear": modalRenomear(p); break;
+    case "duplicar": duplicar(p); break;
+    case "excluir": modalExcluir(p); break;
+    case "exportar-json": exportarJSON(p); break;
+    case "exportar-csv": exportarCSV(p); break;
+    case "relatorio": gerarRelatorio(p); break;
+    case "add-equip": proj().equip.itens.push(novoEquipamento()); salvar(); rerenderTab(); break;
+    case "del-equip": proj().equip.itens.splice(i,1); salvar(); rerenderTab(); break;
+    case "add-fut": proj().equip.futuros.push(novoFuturo()); salvar(); rerenderTab(); break;
+    case "del-fut": proj().equip.futuros.splice(i,1); salvar(); rerenderTab(); break;
+    case "add-obst": proj().sombra.obstaculos.push(novoObstaculo()); salvar(); rerenderTab(); break;
+    case "del-obst": proj().sombra.obstaculos.splice(i,1); salvar(); rerenderTab(); break;
+    case "del-foto": proj().local.fotos.splice(i,1); salvar(); rerenderTab(); break;
+  }
+  if(btn.closest("[data-stop]")) e.stopPropagation();
+});
+
+/* =======================================================================
+   MODAIS
+   ======================================================================= */
+function modal(titulo, corpo, botoes){
+  const mask = document.createElement("div");
+  mask.className = "mask";
+  mask.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>${esc(titulo)}</h3>
+    <div class="mbody">${corpo}</div><div class="mfoot">${botoes}</div></div>`;
+  document.body.appendChild(mask);
+  mask.addEventListener("click", ev => { if(ev.target === mask) mask.remove(); });
+  document.addEventListener("keydown", function onEsc(ev){
+    if(ev.key === "Escape"){ mask.remove(); document.removeEventListener("keydown", onEsc); }
+  });
+  const first = mask.querySelector("input,select"); if(first) setTimeout(()=>first.focus(), 30);
+  return mask;
+}
+function modalNovo(){
+  const m = modal("Novo sistema", `
+    <label class="fld"><span>Nome do sistema</span><input type="text" id="mNome" placeholder="Sistema 01 — Residência João"></label>
+    <label class="fld"><span>Cliente</span><input type="text" id="mCli" placeholder="Nome do cliente"></label>
+    <label class="fld"><span>Tipo de instalação</span><select id="mTipo">
+      ${["Residencial","Comercial","Rural","Industrial","Outro"].map(o=>`<option>${o}</option>`).join("")}</select></label>`,
+    `<button class="btn" id="mCancel">Cancelar</button><button class="btn primary" id="mOk">Criar sistema</button>`);
+  m.querySelector("#mCancel").onclick = ()=> m.remove();
+  m.querySelector("#mOk").onclick = ()=>{
+    const nome = m.querySelector("#mNome").value.trim() || `Sistema ${String(DB.projetos.length+1).padStart(2,"0")}`;
+    const p = modeloProjeto(nome);
+    p.ident.cliente = m.querySelector("#mCli").value.trim();
+    p.ident.projeto = nome;
+    p.ident.tipo = m.querySelector("#mTipo").value;
+    DB.projetos.push(p); saveDB(); m.remove();
+    curId = p.id; curTab = "ident"; view = "projeto"; render();
+    toast("Sistema criado.");
+  };
+}
+function modalRenomear(p){
+  const m = modal("Renomear sistema",
+    `<label class="fld"><span>Nome do sistema</span><input type="text" id="mNome" value="${esc(p.nome)}"></label>`,
+    `<button class="btn" id="mCancel">Cancelar</button><button class="btn primary" id="mOk">Salvar nome</button>`);
+  m.querySelector("#mCancel").onclick = ()=> m.remove();
+  m.querySelector("#mOk").onclick = ()=>{
+    const v = m.querySelector("#mNome").value.trim();
+    if(v){ p.nome = v; p.ident.projeto = v; salvar(); }
+    m.remove(); render(); toast("Nome atualizado.");
+  };
+}
+function modalExcluir(p){
+  const m = modal("Excluir sistema",
+    `<p>Excluir <b>${esc(p.nome)}</b> e todos os dados do levantamento? Esta ação não pode ser desfeita.</p>
+     <p class="muted small">Se quiser guardar uma cópia, cancele e use Exportar antes.</p>`,
+    `<button class="btn" id="mCancel">Cancelar</button><button class="btn danger" id="mOk">Excluir sistema</button>`);
+  m.querySelector("#mCancel").onclick = ()=> m.remove();
+  m.querySelector("#mOk").onclick = ()=>{
+    DB.projetos = DB.projetos.filter(x => x.id !== p.id);
+    saveDB(); m.remove();
+    if(curId === p.id){ curId = null; view = "home"; }
+    render(); toast("Sistema excluído.");
+  };
+}
+function duplicar(p){
+  const c = JSON.parse(JSON.stringify(p));
+  c.id = uid(); c.criadoEm = Date.now(); c.alteradoEm = Date.now();
+  c.nome = p.nome + " (cópia)"; c.ident.projeto = c.nome;
+  DB.projetos.push(c); saveDB(); render();
+  toast("Sistema duplicado.");
+}
+
+/* =======================================================================
+   FOTOS
+   ======================================================================= */
+function bindFotoInput(){
+  const inp = document.getElementById("fotoInput"); if(!inp) return;
+  inp.onchange = () => {
+    const p = proj(); if(!p) return;
+    const files = Array.from(inp.files || []);
+    let restantes = files.length;
+    files.forEach(f=>{
+      const r = new FileReader();
+      r.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const max = 1000;
+          const k = Math.min(1, max / Math.max(img.width, img.height));
+          const cv = document.createElement("canvas");
+          cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+          cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+          p.local.fotos.push({nome: f.name, data: cv.toDataURL("image/jpeg", 0.68)});
+          if(--restantes === 0){ salvar(); rerenderTab(); toast("Foto(s) adicionada(s)."); }
+        };
+        img.onerror = () => { if(--restantes === 0){ salvar(); rerenderTab(); } };
+        img.src = r.result;
+      };
+      r.readAsDataURL(f);
+    });
+  };
+}
+
+/* =======================================================================
+   EXPORTAÇÃO / IMPORTAÇÃO
+   ======================================================================= */
+function slug(s){
+  return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/[^a-zA-Z0-9]+/g,"-").replace(/^-|-$/g,"").toLowerCase() || "projeto";
+}
+function baixar(nome, conteudo, mime){
+  const blob = new Blob([conteudo], {type: mime || "text/plain;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = nome;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 400);
+}
+function exportarJSON(p){
+  const pacote = {app:"levantamento-fotovoltaico", versao:1, exportadoEm:new Date().toISOString(), projeto:p};
+  baixar(`${slug(p.nome)}.json`, JSON.stringify(pacote, null, 2), "application/json");
+  toast("Arquivo JSON gerado.");
+}
+function exportarCSV(p){
+  const C = calc(p), L = [];
+  const sec = t => L.push([], [t.toUpperCase()]);
+  const kv = (k,v) => L.push([k, (v===undefined||v===null||v==="")?"—":String(v)]);
+
+  L.push(["Levantamento fotovoltaico — " + p.nome]);
+  L.push(["Gerado em", new Date().toLocaleString("pt-BR")]);
+
+  sec("1. Identificação");
+  kv("Cliente",p.ident.cliente); kv("Projeto",p.ident.projeto); kv("Tipo",p.ident.tipo);
+  kv("Endereço",p.ident.endereco); kv("Cidade",p.ident.cidade); kv("Estado",p.ident.estado); kv("CEP",p.ident.cep);
+  kv("Telefone",p.ident.telefone); kv("E-mail",p.ident.email); kv("Responsável",p.ident.responsavel);
+  kv("Data da visita",dateBR(p.ident.dataVisita)); kv("Status",p.ident.status); kv("Observações",p.ident.obs);
+
+  sec("2. Consumo");
+  L.push(["Mês","Consumo (kWh)","Fatura (R$)"]);
+  MESES.forEach((m,i)=> L.push([m, p.consumo.meses[i].kwh, p.consumo.meses[i].valor]));
+  kv("Consumo médio (kWh/mês)",fmt(C.consumoMedio,1)); kv("Consumo anual (kWh)",fmt(C.consumoAnual,0));
+  kv("Maior consumo",`${fmt(C.maior,0)} (${C.mesMaior})`); kv("Menor consumo",`${fmt(C.menor,0)} (${C.mesMenor})`);
+  kv("Média 3 meses",fmt(C.media3,1)); kv("Média 6 meses",fmt(C.media6,1)); kv("Média 12 meses",fmt(C.media12,1));
+  kv("Desvio padrão",fmt(C.desvioPadrao,1)); kv("Tipo de tarifa",p.consumo.tarifa);
+  kv("Tensão de atendimento",p.consumo.tensao); kv("Classe",p.consumo.classe); kv("Custo de disponibilidade (kWh)",p.consumo.custoDispKwh);
+
+  sec("3. Equipamentos");
+  L.push(["Nome","Categoria","Qtd","Pot. unit. (W)","Pot. total (W)","Tensão","h/dia","dias/mês","Horário","Frequência","kWh/mês","Obs."]);
+  p.equip.itens.forEach(e=> L.push([e.nome,e.cat,e.qtd,e.pot,num(e.qtd)*num(e.pot),e.tensao,e.horas,e.dias,e.horario,e.freq,
+    fmt(num(e.qtd)*num(e.pot)*num(e.horas)*num(e.dias)/1000,2),e.obs]));
+  kv("Potência instalada (W)",fmt(C.potInstalada,0)); kv("Consumo estimado (kWh/mês)",fmt(C.consumoEquip,1));
+  L.push([]); L.push(["Expansão futura"]);
+  L.push(["Equipamento","Qtd","Potência (W)","h/dia","dias/mês","Previsão","kWh/mês"]);
+  p.equip.futuros.forEach(f=> L.push([f.nome,f.qtd,f.pot,f.horas,f.dias,f.previsao,fmt(num(f.qtd)*num(f.pot)*num(f.horas)*num(f.dias)/1000,2)]));
+  kv("Cenário atual (kWh/mês)",fmt(C.cenarioAtual,0));
+  kv("Cenário futuro provável",fmt(C.cenarioProvavel,0)); kv("Cenário futuro máximo",fmt(C.cenarioMaximo,0));
+
+  sec("4. Local e telhado");
+  kv("Latitude",p.local.lat); kv("Longitude",p.local.lon); kv("Altitude",p.local.altitude);
+  kv("Cobertura",p.local.cobertura); kv("Material",p.local.material); kv("Área disponível (m²)",p.local.area);
+  kv("Comprimento (m)",p.local.comprimento); kv("Largura (m)",p.local.largura);
+  kv("Inclinação (°)",p.local.inclinacao); kv("Azimute (°)",p.local.azimute);
+  kv("Conservação",p.local.conservacao); kv("Estrutura aparente",p.local.estrutura); kv("Manutenção prévia",p.local.manutencao);
+  kv("Local do inversor",p.local.localInversor); kv("Distância módulos→inversor (m)",p.local.distModInv);
+  kv("Distância inversor→quadro (m)",p.local.distInvQuadro); kv("Local do quadro",p.local.localQuadro);
+  kv("Acesso",p.local.acesso); kv("Observações",p.local.obs); kv("Fotos anexadas",p.local.fotos.length);
+
+  sec("5. Sombreamento");
+  L.push(["Tipo","Distância (m)","Altura (m)","Direção","Período","Observação"]);
+  p.sombra.obstaculos.forEach(o=> L.push([o.tipo,o.dist,o.alt,o.dir,o.periodo,o.obs]));
+  kv("Classificação",p.sombra.classificacao); kv("Perda estimada (%)",p.sombra.perdaEstimada);
+  kv("Manhã",p.sombra.manha); kv("Meio-dia",p.sombra.meioDia); kv("Tarde",p.sombra.tarde);
+  kv("Inverno",p.sombra.inverno); kv("Verão",p.sombra.verao); kv("Observações",p.sombra.obs);
+
+  sec("6. Instalação elétrica");
+  kv("Entrada",p.eletrica.entrada); kv("Tensão",p.eletrica.tensao); kv("Potência disponível (kW)",p.eletrica.potDisponivel);
+  kv("Disjuntor geral",p.eletrica.disjuntor); kv("Seção dos condutores (mm²)",p.eletrica.secaoCond);
+  kv("Tipo de condutor",p.eletrica.tipoCond); kv("Distância até conexão (m)",p.eletrica.distConexao);
+  kv("Quadro",p.eletrica.quadro); kv("Estado do quadro",p.eletrica.estadoQuadro); kv("Espaço disponível",p.eletrica.espaco);
+  kv("Barramento",p.eletrica.barramento); kv("Aterramento",p.eletrica.aterramento);
+  kv("Necessita adequação",p.eletrica.adequacao); kv("Observações",p.eletrica.obs);
+
+  sec("7. Dimensionamento");
+  kv("Base de consumo",p.dim.baseConsumo); kv("Consumo base (kWh/mês)",fmt(C.consumoBase,1));
+  kv("HSP (h/dia)",p.dim.hsp); kv("PR",p.dim.pr); kv("Perdas adicionais (%)",p.dim.perdas);
+  kv("PR efetivo",fmt(C.prEf,3)); kv("Compensação desejada (%)",p.dim.compensacao);
+  kv("Energia a compensar (kWh/mês)",fmt(C.energiaAlvo,1)); kv("Potência FV necessária (kWp)",fmt(C.potNecessaria,2));
+  kv("Premissas",p.dim.obs);
+
+  sec("8. Módulos");
+  kv("Fabricante",p.modulo.fab); kv("Modelo",p.modulo.modelo); kv("Potência (Wp)",p.modulo.pot);
+  kv("Eficiência (%)",p.modulo.efic); kv("V_OC (V)",p.modulo.voc); kv("V_MP (V)",p.modulo.vmp);
+  kv("I_SC (A)",p.modulo.isc); kv("I_MP (A)",p.modulo.imp);
+  kv("Coef. V_OC (%/°C)",p.modulo.coefVoc); kv("Coef. V_MP (%/°C)",p.modulo.coefVmp);
+  kv("Dimensões (mm)",`${p.modulo.comp} x ${p.modulo.larg}`); kv("Peso (kg)",p.modulo.peso); kv("Garantia",p.modulo.garantia);
+  kv("Quantidade",p.modulo.qtd); kv("Potência total (kWp)",fmt(C.potFV,2));
+  kv("Área ocupada (m²)",fmt(C.areaTotal,2)); kv("Peso total (kg)",fmt(C.pesoTotal,0));
+
+  sec("9. Strings");
+  kv("Módulos por string",p.strings.modPorString); kv("Número de strings",p.strings.nStrings);
+  kv("Temperatura mínima (°C)",p.strings.tmin); kv("Temperatura máxima da célula (°C)",p.strings.tmaxCel);
+  kv("V_string nominal (V)",fmt(C.vStringNom,1)); kv("V_OC,string nominal (V)",fmt(C.vocStringNom,1));
+  kv("V_OC,string a frio (V)",fmt(C.vocStringFrio,1)); kv("V_MP,string a quente (V)",fmt(C.vmpStringQuente,1));
+  kv("I_string (A)",fmt(C.iString,2)); kv("I_SC,string (A)",fmt(C.iscString,2));
+
+  sec("10. Inversor");
+  kv("Fabricante",p.inv.fab); kv("Modelo",p.inv.modelo); kv("Potência CA (kW)",p.inv.potAC);
+  kv("Tensão máxima CC (V)",p.inv.vdcMax); kv("Faixa MPPT (V)",`${p.inv.mpptMin} – ${p.inv.mpptMax}`);
+  kv("Número de MPPTs",p.inv.nMppt); kv("Corrente máx. por MPPT (A)",p.inv.iMaxMppt);
+  kv("Máximo de strings",p.inv.maxStrings); kv("Eficiência (%)",p.inv.efic);
+  kv("Grau de proteção",p.inv.ip); kv("Temperatura de operação",p.inv.tempOp);
+  kv("Relação DC/CA",fmt(C.dcac,2));
+
+  sec("11. Cabos e proteções");
+  kv("CC — comprimento (m)",p.cabos.dc.comp); kv("CC — seção (mm²)",p.cabos.dc.secao);
+  kv("CC — corrente (A)",fmt(C.idc,2)); kv("CC — tipo",p.cabos.dc.tipo);
+  kv("CC — queda de tensão (V)",fmt(C.dvDC,2)); kv("CC — queda (%)",fmt(C.dvDCpct,2));
+  kv("CA — comprimento (m)",p.cabos.ac.comp); kv("CA — seção (mm²)",p.cabos.ac.secao);
+  kv("CA — corrente (A)",fmt(C.iac,2)); kv("CA — tensão (V)",p.cabos.ac.tensao); kv("CA — ligação",p.cabos.ac.fases);
+  kv("CA — queda de tensão (V)",fmt(C.dvAC,2)); kv("CA — queda (%)",fmt(C.dvACpct,2));
+  kv("Disjuntor CC",p.cabos.disjDC); kv("Seccionamento CC",p.cabos.seccDC); kv("DPS CC",p.cabos.dpsDC);
+  kv("Disjuntor CA",p.cabos.disjAC); kv("Seccionamento CA",p.cabos.seccAC); kv("DPS CA",p.cabos.dpsAC);
+  kv("Observações",p.cabos.obs);
+
+  sec("12. Estrutura");
+  kv("Tipo de telhado",p.estrutura.telhado); kv("Tipo de estrutura",p.estrutura.tipo);
+  kv("Material",p.estrutura.material); kv("Fixação",p.estrutura.fixacao);
+  kv("Pontos de fixação",p.estrutura.pontos); kv("Estado da cobertura",p.estrutura.estadoCobertura);
+  kv("Necessidade de reforço",p.estrutura.reforco); kv("Avaliação estrutural",p.estrutura.avaliacao);
+  kv("Observações",p.estrutura.obs);
+
+  sec("13. Geração");
+  L.push(["Mês","Geração estimada (kWh)","Consumo (kWh)","Saldo (kWh)"]);
+  MESES.forEach((m,i)=> L.push([m, fmt(C.geracaoMensal[i],1), p.consumo.meses[i].kwh, fmt(C.geracaoMensal[i]-C.kwhSerie[i],1)]));
+  kv("Geração anual (kWh)",fmt(C.geracaoAnual,0)); kv("Compensação estimada (%)",fmt(C.compensacaoReal,1));
+  kv("Energia específica (kWh/kWp.ano)",fmt(C.energiaEspecifica,0));
+
+  sec("14. Alertas");
+  alertas(p).forEach(a => L.push([a.t, a.d]));
+  L.push([]); L.push(["Preenchimento do projeto", completude(p).total + "%"]);
+  L.push(["Aviso","Pré-dimensionamento — resultado sujeito à validação técnica."]);
+
+  const csv = L.map(r => (r||[]).map(c=>{
+    const s = String(c===undefined||c===null?"":c);
+    return /[";\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+  }).join(";")).join("\r\n");
+  baixar(`${slug(p.nome)}.csv`, "\uFEFF"+csv, "text/csv;charset=utf-8");
+  toast("Arquivo CSV gerado.");
+}
+function importarArquivo(){
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = ".json,application/json";
+  inp.onchange = () => {
+    const f = inp.files && inp.files[0]; if(!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try{
+        const d = JSON.parse(r.result);
+        let lista = [];
+        if(d && d.projeto) lista = [d.projeto];
+        else if(d && Array.isArray(d.projetos)) lista = d.projetos;
+        else if(Array.isArray(d)) lista = d;
+        else if(d && d.ident) lista = [d];
+        if(!lista.length) throw new Error("estrutura desconhecida");
+        lista.forEach(x=>{
+          const p = normalizar(x);
+          p.id = uid(); p.alteradoEm = Date.now();
+          if(DB.projetos.some(q => q.nome === p.nome)) p.nome += " (importado)";
+          DB.projetos.push(p);
+        });
+        saveDB(); view = "home"; curId = null; render();
+        toast(`${lista.length} projeto(s) importado(s).`);
+      }catch(err){
+        toast("Arquivo inválido. Use um JSON exportado por este aplicativo.");
+      }
+    };
+    r.readAsText(f);
+  };
+  inp.click();
+}
+
+/* =======================================================================
+   RELATÓRIO (janela para impressão / PDF)
+   ======================================================================= */
+function gerarRelatorio(p){
+  const C = calc(p), comp = completude(p), A = alertas(p);
+  const row = (k,v) => `<tr><th>${esc(k)}</th><td>${v===""||v===undefined||v===null?"—":esc(String(v))}</td></tr>`;
+  const bloco = (n,t,corpo) => `<section><h2><span>${n}</span>${esc(t)}</h2>${corpo}</section>`;
+  const tab = (head, rows) => `<table class="grid"><thead><tr>${head.map(h=>`<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>`;
+
+  const consumoRows = MESES.map((m,i)=>`<tr><td>${m}</td><td class="n">${p.consumo.meses[i].kwh||"—"}</td><td class="n">${p.consumo.meses[i].valor||"—"}</td>
+      <td class="n">${dash(C.geracaoMensal[i],0)}</td></tr>`).join("");
+  const equipRows = p.equip.itens.length ? p.equip.itens.map(e=>`<tr><td>${esc(e.nome||"—")}</td><td>${esc(e.cat)}</td><td class="n">${e.qtd}</td>
+      <td class="n">${e.pot||"—"}</td><td class="n">${dash(num(e.qtd)*num(e.pot),0)}</td><td class="n">${e.horas||"—"}</td><td class="n">${e.dias||"—"}</td>
+      <td class="n">${dash(num(e.qtd)*num(e.pot)*num(e.horas)*num(e.dias)/1000,1)}</td></tr>`).join("")
+      : `<tr><td colspan="8">Nenhum equipamento cadastrado.</td></tr>`;
+  const futRows = p.equip.futuros.length ? p.equip.futuros.map(f=>`<tr><td>${esc(f.nome||"—")}</td><td class="n">${f.qtd}</td><td class="n">${f.pot||"—"}</td>
+      <td class="n">${f.horas||"—"}</td><td>${esc(f.previsao)}</td><td class="n">${dash(num(f.qtd)*num(f.pot)*num(f.horas)*num(f.dias)/1000,1)}</td></tr>`).join("")
+      : `<tr><td colspan="6">Nenhuma carga futura prevista.</td></tr>`;
+  const obstRows = p.sombra.obstaculos.length ? p.sombra.obstaculos.map(o=>`<tr><td>${esc(o.tipo)}</td><td class="n">${o.dist||"—"}</td><td class="n">${o.alt||"—"}</td>
+      <td>${esc(o.dir)}</td><td>${esc(o.periodo)}</td><td>${esc(o.obs||"—")}</td></tr>`).join("")
+      : `<tr><td colspan="6">Nenhum obstáculo registrado.</td></tr>`;
+  const fotos = p.local.fotos.length ? `<div class="fotos">${p.local.fotos.map(f=>`<figure><img src="${f.data}"><figcaption>${esc(f.nome)}</figcaption></figure>`).join("")}</div>` : "";
+
+  const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+<title>Relatório — ${esc(p.nome)}</title>
+<style>
+  @page{size:A4;margin:16mm 14mm}
+  *{box-sizing:border-box}
+  body{font:12px/1.45 "Segoe UI",system-ui,Arial,sans-serif;color:#14181d;margin:0;padding:24px;background:#fff;max-width:900px;margin:0 auto}
+  header.cap{border-bottom:2px solid #17557a;padding-bottom:12px;margin-bottom:18px;display:flex;align-items:flex-end;gap:18px}
+  header.cap h1{font-size:19px;margin:0}
+  header.cap p{margin:3px 0 0;color:#6b7683;font-size:12px}
+  header.cap .meta{margin-left:auto;text-align:right;color:#6b7683;font-size:11.5px}
+  section{margin:0 0 18px;break-inside:avoid}
+  h2{font-size:13.5px;margin:0 0 8px;display:flex;align-items:center;gap:9px;border-bottom:1px solid #dde2e8;padding-bottom:5px}
+  h2 span{background:#17557a;color:#fff;width:20px;height:20px;border-radius:4px;display:inline-grid;place-items:center;font-size:11px}
+  table{width:100%;border-collapse:collapse;margin-bottom:6px}
+  th,td{border:1px solid #dde2e8;padding:4px 7px;text-align:left;vertical-align:top}
+  table:not(.grid) th{width:33%;background:#f6f8f9;color:#39424e;font-weight:600}
+  table.grid th{background:#f6f8f9;font-size:11px;color:#6b7683}
+  td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+  .kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+  .kpis div{border:1px solid #dde2e8;padding:7px 9px;background:#f9fafb}
+  .kpis b{display:block;font-size:16px;margin-top:2px}
+  .kpis small{color:#6b7683}
+  .al{border-left:3px solid #9a6414;background:#fbf2e2;padding:5px 9px;margin-bottom:5px;font-size:11.5px}
+  .al.err{border-color:#b23a2e;background:#fbeceb}
+  .al.ok{border-color:#1f7a4d;background:#e8f4ee}
+  .al.info{border-color:#17557a;background:#e8f0f5}
+  .aviso{border:1px solid #ecdcbe;background:#fbf2e2;color:#6f4a11;padding:8px 11px;font-size:11.5px;margin-top:16px}
+  .fotos{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .fotos img{width:100%;height:110px;object-fit:cover;border:1px solid #dde2e8}
+  .fotos figcaption{font-size:10px;color:#6b7683}
+  .bar{height:8px;background:#dde2e8;margin-top:5px}
+  .bar i{display:block;height:100%;background:#17557a}
+  footer{margin-top:20px;border-top:1px solid #dde2e8;padding-top:8px;color:#6b7683;font-size:10.5px}
+  .noprint{margin-bottom:16px}
+  @media print{.noprint{display:none}body{padding:0}}
+</style></head><body>
+<div class="noprint"><button onclick="window.print()" style="padding:8px 14px;cursor:pointer">Imprimir / salvar em PDF</button></div>
+<header class="cap">
+  <div><h1>${esc(p.nome)}</h1><p>Relatório de levantamento técnico e pré-dimensionamento fotovoltaico</p></div>
+  <div class="meta">${esc(p.ident.cliente||"")}<br>${esc([p.ident.cidade,p.ident.estado].filter(Boolean).join("/"))}<br>
+  Visita: ${dateBR(p.ident.dataVisita)} · Emitido em ${new Date().toLocaleDateString("pt-BR")}</div>
+</header>
+
+<div class="kpis">
+  <div><small>Consumo médio</small><b>${dash(C.consumoMedio,0)} kWh/mês</b></div>
+  <div><small>Potência FV</small><b>${dash(C.potFV,2)} kWp</b></div>
+  <div><small>Módulos</small><b>${C.nMod||"—"}</b></div>
+  <div><small>Inversor</small><b>${dash(C.potAC,2)} kW</b></div>
+  <div><small>Geração anual</small><b>${C.geracaoAnual?fmt(C.geracaoAnual/1000,2):"—"} MWh</b></div>
+  <div><small>Compensação estimada</small><b>${C.compensacaoReal?fmt(C.compensacaoReal,0)+"%":"—"}</b></div>
+</div>
+
+${bloco(1,"Identificação", `<table>
+  ${row("Cliente",p.ident.cliente)}${row("Projeto",p.ident.projeto)}${row("Tipo de instalação",p.ident.tipo)}
+  ${row("Endereço",[p.ident.endereco,p.ident.cidade,p.ident.estado,p.ident.cep].filter(Boolean).join(", "))}
+  ${row("Contato",[p.ident.telefone,p.ident.email].filter(Boolean).join(" · "))}
+  ${row("Responsável",p.ident.responsavel)}${row("Data da visita",dateBR(p.ident.dataVisita))}${row("Status",p.ident.status)}
+  ${row("Observações",p.ident.obs)}</table>`)}
+
+${bloco(2,"Consumo", tab(["Mês","Consumo (kWh)","Fatura (R$)","Geração estimada (kWh)"], consumoRows) + `<table>
+  ${row("Consumo médio",fmt(C.consumoMedio,1)+" kWh/mês")}${row("Consumo anual",fmt(C.consumoAnual,0)+" kWh")}
+  ${row("Maior / menor",`${fmt(C.maior,0)} (${C.mesMaior}) / ${fmt(C.menor,0)} (${C.mesMenor})`)}
+  ${row("Médias 3 / 6 / 12 meses",`${fmt(C.media3,0)} / ${fmt(C.media6,0)} / ${fmt(C.media12,0)} kWh`)}
+  ${row("Desvio padrão",fmt(C.desvioPadrao,1)+` kWh (${fmt(C.desvioPct,1)}%)`)}
+  ${row("Tarifa / tensão / classe",[p.consumo.tarifa,p.consumo.tensao,p.consumo.classe].join(" · "))}
+  ${row("Custo de disponibilidade",p.consumo.custoDispKwh?p.consumo.custoDispKwh+" kWh/mês":"—")}
+  ${row("Observações",p.consumo.obs)}</table>`)}
+
+${bloco(3,"Equipamentos e cargas", tab(["Equipamento","Categoria","Qtd","Pot. unit. (W)","Pot. total (W)","h/dia","dias/mês","kWh/mês"], equipRows) +
+  `<table>${row("Potência instalada",fmt(C.potInstalada,0)+" W")}${row("Consumo levantado",fmt(C.consumoEquip,1)+" kWh/mês")}</table>
+   <h3 style="font-size:12px;margin:10px 0 5px">Expansão futura</h3>` +
+  tab(["Equipamento","Qtd","Potência (W)","h/dia","Previsão","kWh/mês"], futRows) +
+  `<table>${row("Cenário atual",fmt(C.cenarioAtual,0)+" kWh/mês")}${row("Futuro provável",fmt(C.cenarioProvavel,0)+" kWh/mês")}${row("Futuro máximo",fmt(C.cenarioMaximo,0)+" kWh/mês")}</table>`)}
+
+${bloco(4,"Local e telhado", `<table>
+  ${row("Coordenadas",[p.local.lat,p.local.lon].filter(Boolean).join(", "))}${row("Altitude",p.local.altitude)}
+  ${row("Cobertura",[p.local.cobertura,p.local.material].filter(Boolean).join(" · "))}
+  ${row("Área disponível",p.local.area?p.local.area+" m²":"—")}
+  ${row("Dimensões",[p.local.comprimento,p.local.largura].filter(Boolean).join(" × "))}
+  ${row("Inclinação / azimute",`${p.local.inclinacao||"—"}° / ${p.local.azimute||"—"}°`)}
+  ${row("Conservação",p.local.conservacao)}${row("Estrutura aparente",p.local.estrutura)}
+  ${row("Manutenção prévia",p.local.manutencao)}${row("Local do inversor",p.local.localInversor)}
+  ${row("Distâncias",`módulos→inversor ${p.local.distModInv||"—"} m · inversor→quadro ${p.local.distInvQuadro||"—"} m`)}
+  ${row("Acesso para manutenção",p.local.acesso)}${row("Observações",p.local.obs)}</table>${fotos}`)}
+
+${bloco(5,"Sombreamento", tab(["Tipo","Distância (m)","Altura (m)","Direção","Período","Observação"], obstRows) + `<table>
+  ${row("Classificação",p.sombra.classificacao)}${row("Perda estimada",p.sombra.perdaEstimada?p.sombra.perdaEstimada+"%":"—")}
+  ${row("Períodos com sombra",`Manhã ${p.sombra.manha} · Meio-dia ${p.sombra.meioDia} · Tarde ${p.sombra.tarde} · Inverno ${p.sombra.inverno} · Verão ${p.sombra.verao}`)}
+  ${row("Observações",p.sombra.obs)}</table>`)}
+
+${bloco(6,"Instalação elétrica", `<table>
+  ${row("Entrada / tensão",`${p.eletrica.entrada} · ${p.eletrica.tensao}`)}
+  ${row("Potência disponível",p.eletrica.potDisponivel?p.eletrica.potDisponivel+" kW":"—")}
+  ${row("Disjuntor geral",p.eletrica.disjuntor)}${row("Condutores",`${p.eletrica.secaoCond||"—"} mm² · ${p.eletrica.tipoCond}`)}
+  ${row("Distância até o ponto de conexão",p.eletrica.distConexao?p.eletrica.distConexao+" m":"—")}
+  ${row("Quadro",`${p.eletrica.quadro||"—"} · estado ${p.eletrica.estadoQuadro} · espaço ${p.eletrica.espaco}`)}
+  ${row("Barramento",p.eletrica.barramento)}${row("Aterramento",p.eletrica.aterramento)}
+  ${row("Necessita adequação",p.eletrica.adequacao)}${row("Observações",p.eletrica.obs)}</table>`)}
+
+${bloco(7,"Dimensionamento", `<table>
+  ${row("Base de consumo",`${p.dim.baseConsumo} — ${fmt(C.consumoBase,1)} kWh/mês`)}
+  ${row("HSP",p.dim.hsp?p.dim.hsp+" h/dia":"—")}${row("PR / perdas",`${p.dim.pr} / ${p.dim.perdas}% → PR efetivo ${fmt(C.prEf,3)}`)}
+  ${row("Compensação desejada",p.dim.compensacao+"%")}${row("Energia a compensar",fmt(C.energiaAlvo,1)+" kWh/mês")}
+  ${row("Potência FV necessária",fmt(C.potNecessaria,2)+" kWp")}${row("Premissas",p.dim.obs)}</table>`)}
+
+${bloco(8,"Módulos", `<table>
+  ${row("Módulo",[p.modulo.fab,p.modulo.modelo].filter(Boolean).join(" "))}
+  ${row("Potência / eficiência",`${p.modulo.pot||"—"} Wp · ${p.modulo.efic||"—"}%`)}
+  ${row("V_OC / V_MP",`${p.modulo.voc||"—"} V / ${p.modulo.vmp||"—"} V`)}
+  ${row("I_SC / I_MP",`${p.modulo.isc||"—"} A / ${p.modulo.imp||"—"} A`)}
+  ${row("Coeficientes V_OC / V_MP",`${p.modulo.coefVoc} %/°C · ${p.modulo.coefVmp} %/°C`)}
+  ${row("Dimensões / peso",`${p.modulo.comp||"—"} × ${p.modulo.larg||"—"} mm · ${p.modulo.peso||"—"} kg`)}
+  ${row("Quantidade",p.modulo.qtd)}${row("Potência total",fmt(C.potFV,2)+" kWp")}
+  ${row("Área / peso totais",`${fmt(C.areaTotal,1)} m² · ${fmt(C.pesoTotal,0)} kg`)}${row("Garantia",p.modulo.garantia)}</table>`)}
+
+${bloco(9,"Strings", `<table>
+  ${row("Arranjo",`${p.strings.nStrings||"—"} string(s) × ${p.strings.modPorString||"—"} módulos`)}
+  ${row("Temperaturas",`mínima ${p.strings.tmin} °C · máxima da célula ${p.strings.tmaxCel} °C`)}
+  ${row("V_string nominal",fmt(C.vStringNom,1)+" V")}${row("V_OC,string a frio",fmt(C.vocStringFrio,1)+" V")}
+  ${row("V_MP,string a quente",fmt(C.vmpStringQuente,1)+" V")}
+  ${row("I_string / I_SC,string",`${fmt(C.iString,2)} A / ${fmt(C.iscString,2)} A`)}</table>`)}
+
+${bloco(10,"Inversor", `<table>
+  ${row("Inversor",[p.inv.fab,p.inv.modelo].filter(Boolean).join(" "))}
+  ${row("Potência CA",p.inv.potAC?p.inv.potAC+" kW":"—")}${row("Tensão máxima CC",p.inv.vdcMax?p.inv.vdcMax+" V":"—")}
+  ${row("Faixa MPPT",`${p.inv.mpptMin||"—"} – ${p.inv.mpptMax||"—"} V · ${p.inv.nMppt||"—"} MPPT`)}
+  ${row("Corrente máx. por MPPT",p.inv.iMaxMppt?p.inv.iMaxMppt+" A":"—")}${row("Máximo de strings",p.inv.maxStrings)}
+  ${row("Relação DC/CA",C.dcac?fmt(C.dcac,2):"—")}${row("Proteção / temperatura",`${p.inv.ip} · ${p.inv.tempOp}`)}</table>`)}
+
+${bloco(11,"Cabos e proteções", `<table>
+  ${row("Circuito CC",`${p.cabos.dc.comp||"—"} m · ${p.cabos.dc.secao||"—"} mm² · ${fmt(C.idc,2)} A · ${p.cabos.dc.tipo}`)}
+  ${row("Queda CC",`${fmt(C.dvDC,2)} V (${fmt(C.dvDCpct,2)}%)`)}
+  ${row("Circuito CA",`${p.cabos.ac.comp||"—"} m · ${p.cabos.ac.secao||"—"} mm² · ${fmt(C.iac,2)} A · ${p.cabos.ac.fases}`)}
+  ${row("Queda CA",`${fmt(C.dvAC,2)} V (${fmt(C.dvACpct,2)}%)`)}
+  ${row("Proteções CC",`disjuntor ${p.cabos.disjDC||"—"} · seccionamento ${p.cabos.seccDC||"—"} · DPS ${p.cabos.dpsDC||"—"}`)}
+  ${row("Proteções CA",`disjuntor ${p.cabos.disjAC||"—"} · seccionamento ${p.cabos.seccAC||"—"} · DPS ${p.cabos.dpsAC||"—"}`)}
+  ${row("Observações",p.cabos.obs)}</table>`)}
+
+${bloco(12,"Estrutura", `<table>
+  ${row("Telhado / estrutura",`${p.estrutura.telhado} · ${p.estrutura.tipo}`)}
+  ${row("Material / fixação",`${p.estrutura.material||"—"} · ${p.estrutura.fixacao}`)}
+  ${row("Pontos de fixação",p.estrutura.pontos)}${row("Estado da cobertura",p.estrutura.estadoCobertura)}
+  ${row("Reforço",p.estrutura.reforco)}${row("Avaliação estrutural",p.estrutura.avaliacao)}
+  ${row("Carga estimada",C.areaTotal?`${fmt(C.pesoTotal,0)} kg · ${fmt(C.pesoTotal/C.areaTotal,1)} kg/m² (módulos)`:"—")}
+  ${row("Observações",p.estrutura.obs)}</table>`)}
+
+${bloco(13,"Geração", `<table>
+  ${row("Potência instalada",fmt(C.potFV,2)+" kWp")}${row("HSP / PR efetivo",`${p.dim.hsp||"—"} h/dia · ${fmt(C.prEf,3)}`)}
+  ${row("Geração mensal média",fmt(C.geracaoMedia,0)+" kWh")}${row("Geração anual",fmt(C.geracaoAnual,0)+" kWh")}
+  ${row("Energia específica",fmt(C.energiaEspecifica,0)+" kWh/kWp·ano")}
+  ${row("Compensação estimada",C.compensacaoReal?fmt(C.compensacaoReal,1)+"%":"—")}</table>
+  <p style="font-size:11px;color:#6b7683">Detalhamento mensal de geração na tabela da seção 2.</p>`)}
+
+${bloco(14,"Resumo e alertas", `<p style="margin:0 0 4px">Preenchimento do levantamento: <b>${comp.total}%</b></p>
+  <div class="bar"><i style="width:${comp.total}%"></i></div>
+  <div style="margin-top:10px">${A.map(a=>`<div class="al ${a.kind==="err"?"err":a.kind==="ok"?"ok":a.kind==="info"?"info":""}"><b>${esc(a.t)}</b> — ${esc(a.d)}</div>`).join("")}</div>`)}
+
+<div class="aviso"><b>Pré-dimensionamento — resultado sujeito à validação técnica.</b> Os valores calculados são estimativas baseadas nos dados informados neste levantamento e não substituem projeto executivo, memorial de cálculo, simulação com base de irradiação oficial nem a aprovação da distribuidora.</div>
+<footer>${esc(p.nome)} · Responsável pelo levantamento: ${esc(p.ident.responsavel||"—")} · Documento gerado pelo aplicativo de levantamento fotovoltaico em ${new Date().toLocaleString("pt-BR")}.</footer>
+</body></html>`;
+
+  const w = window.open("", "_blank");
+  if(!w){ toast("O navegador bloqueou a nova janela. Libere os pop-ups para gerar o relatório."); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
+/* =======================================================================
+   INÍCIO
+   ======================================================================= */
+render();
